@@ -162,7 +162,7 @@ app.openapi = _branded_openapi
 @app.get("/docs", include_in_schema=False)
 def custom_swagger_ui_html() -> HTMLResponse:
     response = get_swagger_ui_html(
-        openapi_url=external_url(app.openapi_url),
+        openapi_url=external_url(app.openapi_url or "/openapi.json"),
         title=f"{app.title} - Swagger UI",
         swagger_favicon_url=CASTERLY_FAVICON_URL,
     )
@@ -200,10 +200,12 @@ def custom_swagger_ui_html() -> HTMLResponse:
 @app.get("/redoc", include_in_schema=False)
 def custom_redoc_html() -> HTMLResponse:
     return get_redoc_html(
-        openapi_url=external_url(app.openapi_url),
+        openapi_url=external_url(app.openapi_url or "/openapi.json"),
         title=f"{app.title} - ReDoc",
         redoc_favicon_url=CASTERLY_FAVICON_URL,
     )
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     # Module 9 (API Standards) §"Error Handling": every error response
@@ -415,40 +417,42 @@ def admin_route(current_user: User = Depends(get_admin_user)):
 
 @app.get("/ui", include_in_schema=False)
 def ui_page():
-    # Cache-busting: browsers aggressively cache /static/* by URL, so an
-    # edit to styles.css/app.js can silently keep serving the old file to
-    # anyone who navigates normally (not a hard-refresh) — exactly what
-    # happened testing the theme rollout. Stamping each asset URL with a
-    # hash of its own current content means the URL itself changes the
-    # instant the file does, so a plain reload always gets the current
-    # version — no one has to remember Ctrl+Shift+R after every edit.
     html = (FRONTEND_DIR / "index.html").read_text(encoding="utf-8")
-    css_hash = hashlib.md5((FRONTEND_DIR / "styles.css").read_bytes()).hexdigest()[:10]
-    js_hash = hashlib.md5((FRONTEND_DIR / "app.js").read_bytes()).hexdigest()[:10]
 
+    css_hash = hashlib.md5(
+        (FRONTEND_DIR / "styles.css").read_bytes()
+    ).hexdigest()[:10]
+
+    js_hash = hashlib.md5(
+        (FRONTEND_DIR / "app.js").read_bytes()
+    ).hexdigest()[:10]
+
+    # Make every /static/... reference work behind ROOT_PATH=/auth.
+    static_prefix = external_url("/static/")
+
+    html = html.replace(
+        '"/static/',
+        f'"{static_prefix}',
+    )
+
+    # Cache-bust CSS and JavaScript.
     css_url = external_url("/static/styles.css")
     js_url = external_url("/static/app.js")
 
     html = html.replace(
-        '<link rel="stylesheet" href="/static/styles.css" />',
-        f'<link rel="stylesheet" href="{css_url}?v={css_hash}" />',
+        f'href="{css_url}"',
+        f'href="{css_url}?v={css_hash}"',
     )
 
     html = html.replace(
-        '<script src="/static/app.js"></script>',
-        f'<script src="{js_url}?v={js_hash}"></script>',
+        f'src="{js_url}"',
+        f'src="{js_url}?v={js_hash}"',
     )
 
-    # The hash-busted asset URLs above only help if the browser actually
-    # re-fetches *this* HTML document on every reload — without an
-    # explicit no-store here, a plain reload (including the ones the app
-    # fires after every Save/Edit/Delete) can be served straight from the
-    # browser's own HTTP cache, silently keeping an old index.html frozen
-    # in place (e.g. a version from before full-page-reload-after-save
-    # existed), which reads exactly like "it only refreshed the list"
-    # even though the current code does a real full reload. /ui is cheap
-    # to regenerate, so never let it be cached.
-    return HTMLResponse(content=html, headers={"Cache-Control": "no-store"})
+    return HTMLResponse(
+        content=html,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")

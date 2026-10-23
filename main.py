@@ -75,9 +75,9 @@ app = FastAPI(
     title="Nexus One Authentication Service",
     version="1.0.0",
     description="Intern prototype for Authentication & Token Management.",
-    root_path=ROOT_PATH,
     docs_url=None,
     redoc_url=None,
+    servers=[{"url": ROOT_PATH}] if ROOT_PATH else None,
 )
 
 app_settings = get_settings()

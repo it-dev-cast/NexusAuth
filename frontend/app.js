@@ -818,7 +818,7 @@ async function api(path, { method = "GET", body, auth = false } = {}) {
     }
     headers.Authorization = `Bearer ${state.accessToken}`;
   }
-  const response = await fetch(path, {
+  const response = await fetch(withBasePath(path), {
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -1787,7 +1787,7 @@ async function uploadEmployeePhoto(file) {
   try {
     const formData = new FormData();
     formData.append("file", file);
-    const response = await fetch("/api/v1/uploads/employee-photo", {
+    const response = await fetch(withBasePath("/api/v1/uploads/employee-photo"), {
       method: "POST",
       headers: { Authorization: `Bearer ${state.accessToken}` },
       // No Content-Type here — the browser sets multipart/form-data with

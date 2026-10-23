@@ -1,4 +1,5 @@
 import hashlib
+import os
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request, Response
@@ -68,17 +69,33 @@ finally:
     _bootstrap_db.close()
 
 
+ROOT_PATH = os.getenv("ROOT_PATH", "").rstrip("/")
+
 app = FastAPI(
     title="Nexus One Authentication Service",
     version="1.0.0",
     description="Intern prototype for Authentication & Token Management.",
-    # Branding: docs/redoc are re-defined below as custom routes so the
-    # Casterly logo can be injected into them. Disable FastAPI's built-in
-    # ones here so there's no duplicate/unbranded route at the same path.
+    root_path=ROOT_PATH,
     docs_url=None,
     redoc_url=None,
 )
+
 app_settings = get_settings()
+
+
+def external_url(path: str) -> str:
+    """
+    Build a public URL that includes the reverse-proxy root path.
+
+    Example:
+        ROOT_PATH=/auth
+        /openapi.json -> /auth/openapi.json
+        /static/app.js -> /auth/static/app.js
+    """
+    if not path.startswith("/"):
+        path = f"/{path}"
+
+    return f"{ROOT_PATH}{path}"
 
 # Middleware execution order (outermost first, since Starlette makes the
 # LAST add_middleware call the outermost layer): CORS -> SecurityHeaders ->
@@ -117,22 +134,25 @@ app.add_middleware(
 app.add_exception_handler(AuthError, auth_error_handler)
 
 BRANDING_DIR = FRONTEND_DIR / "branding"
-CASTERLY_FAVICON_URL = "/static/branding/favicon.ico"
 
-# ReDoc reads a logo straight from the OpenAPI document (the "x-logo"
-# extension is ReDoc's own documented convention, not something Swagger UI
-# understands) — so the branding for /redoc goes on the schema, once,
-# rather than on the route.
+CASTERLY_FAVICON_URL = external_url("/static/branding/favicon.ico")
+CASTERLY_LOGO_URL = external_url(
+    "/static/branding/casterly-logo-horizontal.png"
+)
+
+# ReDoc reads the logo directly from the OpenAPI document.
 _original_openapi = app.openapi
 
 
 def _branded_openapi() -> dict:
     schema = _original_openapi()
+
     schema["info"]["x-logo"] = {
-        "url": "/static/branding/casterly-logo-horizontal.png",
+        "url": CASTERLY_LOGO_URL,
         "backgroundColor": "#1A0A37",
         "altText": "Casterly",
     }
+
     return schema
 
 
@@ -142,46 +162,48 @@ app.openapi = _branded_openapi
 @app.get("/docs", include_in_schema=False)
 def custom_swagger_ui_html() -> HTMLResponse:
     response = get_swagger_ui_html(
-        openapi_url=app.openapi_url,
+        openapi_url=external_url(app.openapi_url),
         title=f"{app.title} - Swagger UI",
         swagger_favicon_url=CASTERLY_FAVICON_URL,
     )
-    # get_swagger_ui_html has no parameter for a logo, and FastAPI's template
-    # renders with "layout": "BaseLayout" (not Swagger's own
-    # StandaloneLayout), which doesn't even build a topbar element to
-    # restyle — there's nothing in the DOM a `.topbar` CSS override could
-    # attach to. Simplest reliable option: splice our own logo bar directly
-    # into the static HTML, above Swagger UI's mount point, rather than
-    # fighting the client-side layout for a topbar it doesn't render.
+
     branding_css = """
     <style>
         .casterly-topbar {
             background-color: #1A0A37;
             padding: 10px 20px;
         }
-        .casterly-topbar img { height: 40px; display: block; }
+
+        .casterly-topbar img {
+            height: 40px;
+            display: block;
+        }
     </style>
     """
+
     branding_bar = (
         '<div class="casterly-topbar">'
-        '<img src="/static/branding/casterly-logo-horizontal.png" alt="Casterly">'
+        f'<img src="{CASTERLY_LOGO_URL}" alt="Casterly">'
         "</div>"
     )
+
     body = response.body.decode("utf-8")
     body = body.replace("</head>", branding_css + "</head>")
-    body = body.replace('<div id="swagger-ui">', branding_bar + '<div id="swagger-ui">')
+    body = body.replace(
+        '<div id="swagger-ui">',
+        branding_bar + '<div id="swagger-ui">',
+    )
+
     return HTMLResponse(content=body)
 
 
 @app.get("/redoc", include_in_schema=False)
 def custom_redoc_html() -> HTMLResponse:
     return get_redoc_html(
-        openapi_url=app.openapi_url,
+        openapi_url=external_url(app.openapi_url),
         title=f"{app.title} - ReDoc",
         redoc_favicon_url=CASTERLY_FAVICON_URL,
     )
-
-
 @app.exception_handler(RequestValidationError)
 async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     # Module 9 (API Standards) §"Error Handling": every error response
@@ -403,14 +425,20 @@ def ui_page():
     html = (FRONTEND_DIR / "index.html").read_text(encoding="utf-8")
     css_hash = hashlib.md5((FRONTEND_DIR / "styles.css").read_bytes()).hexdigest()[:10]
     js_hash = hashlib.md5((FRONTEND_DIR / "app.js").read_bytes()).hexdigest()[:10]
+
+    css_url = external_url("/static/styles.css")
+    js_url = external_url("/static/app.js")
+
     html = html.replace(
         '<link rel="stylesheet" href="/static/styles.css" />',
-        f'<link rel="stylesheet" href="/static/styles.css?v={css_hash}" />',
+        f'<link rel="stylesheet" href="{css_url}?v={css_hash}" />',
     )
+
     html = html.replace(
         '<script src="/static/app.js"></script>',
-        f'<script src="/static/app.js?v={js_hash}"></script>',
+        f'<script src="{js_url}?v={js_hash}"></script>',
     )
+
     # The hash-busted asset URLs above only help if the browser actually
     # re-fetches *this* HTML document on every reload — without an
     # explicit no-store here, a plain reload (including the ones the app

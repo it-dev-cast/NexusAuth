@@ -1,0 +1,128 @@
+{
+  "info": {
+    "name": "NexusAuth",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Register",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"intern.demo@casterly.com\",\n  \"password\": \"ExamplePasswordOnly\",\n  \"full_name\": \"Intern Demo\"\n}"
+        },
+        "url": "{{baseUrl}}/api/v1/auth/register"
+      }
+    },
+    {
+      "name": "Login",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"intern.demo@casterly.com\",\n  \"password\": \"ExamplePasswordOnly\"\n}"
+        },
+        "url": "{{baseUrl}}/api/v1/auth/login"
+      }
+    },
+    {
+      "name": "Me",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+        "url": "{{baseUrl}}/api/v1/auth/me"
+      }
+    },
+    {
+      "name": "Refresh",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}"
+        },
+        "url": "{{baseUrl}}/api/v1/auth/refresh"
+      }
+    },
+    {
+      "name": "Logout",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{access_token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": { "mode": "raw", "raw": "{}" },
+        "url": "{{baseUrl}}/api/v1/auth/logout"
+      }
+    },
+    {
+      "name": "Sessions",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+        "url": "{{baseUrl}}/api/v1/auth/sessions"
+      }
+    },
+    {
+      "name": "Revoke session",
+      "request": {
+        "method": "DELETE",
+        "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+        "url": "{{baseUrl}}/api/v1/auth/sessions/1"
+      }
+    },
+    {
+      "name": "Logout all",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+        "url": "{{baseUrl}}/api/v1/auth/logout-all"
+      }
+    },
+    {
+      "name": "Protected",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+        "url": "{{baseUrl}}/protected"
+      }
+    },
+    {
+      "name": "Login failure",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"intern.demo@casterly.com\",\n  \"password\": \"WrongPassword\"\n}"
+        },
+        "url": "{{baseUrl}}/api/v1/auth/login"
+      }
+    },
+    {
+      "name": "Missing Authorization header",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/api/v1/auth/me"
+      }
+    },
+    {
+      "name": "Header without Bearer",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Token abc" }],
+        "url": "{{baseUrl}}/api/v1/auth/me"
+      }
+    }
+  ],
+  "variable": [
+    { "key": "baseUrl", "value": "http://127.0.0.1:8090" },
+    { "key": "access_token", "value": "" },
+    { "key": "refresh_token", "value": "" }
+  ]
+}

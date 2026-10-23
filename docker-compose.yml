@@ -1,0 +1,50 @@
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: change-me
+      POSTGRES_DB: nexus_auth
+    ports:
+      - "5432:5432"
+    volumes:
+      - nexus_auth_pgdata:/var/lib/postgresql/data
+
+  # Foundation Core Phase 2 deliverable: "n8n workflow engine integrated"
+  # (NEXUS_ONE_ARCHITECTURE_PLAN §9 Phase 2, §6's own compose snippet).
+  # Official image — no custom Dockerfile needed. nexusAuth itself (the
+  # api) still runs directly on the host in this repo, not in a
+  # container (there's no app Dockerfile here — that's a separate,
+  # not-yet-done piece of work), so n8n's HTTP Request nodes reach it via
+  # host.docker.internal:8000, not a compose service name.
+  n8n:
+    image: n8nio/n8n:latest
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=${N8N_USER:-admin}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_PASSWORD:?set N8N_PASSWORD in .env}
+    ports:
+      - "5678:5678"
+    volumes:
+      - nexus_auth_n8n_data:/home/node/.n8n
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Foundation Core Phase 2 deliverable: "API gateway routing" (§9 Phase
+  # 2). Same host.docker.internal reasoning as n8n above — proxies to
+  # the api and to n8n's own UI/webhooks under one public port. See
+  # ops/nginx/nginx.conf for the actual routing rules.
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./ops/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - n8n
+
+volumes:
+  nexus_auth_pgdata:
+  nexus_auth_n8n_data:

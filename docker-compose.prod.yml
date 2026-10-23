@@ -1,0 +1,61 @@
+# Production deployment — 192.168.0.190 (dedicated port 8300, see the
+# already-enabled /etc/nginx/sites-enabled/nexusauth: listens 8300,
+# proxies to 127.0.0.1:8200). No app code changes, no path rewriting —
+# the api container binds host 8200 directly, matching what that Nginx
+# site already expects.
+#
+# `db` matches the service already running on the server byte-for-byte
+# (same container_name/image/ports/volume) — only its credentials moved
+# from hardcoded values into ${...} substitution from .env, so this file
+# never carries a real secret in git. /opt/nexusauth/.env already has
+# matching values; do not regenerate them here or the running container's
+# actual Postgres password (set at first init, persisted in the volume)
+# will stop matching what's in .env.
+services:
+  db:
+    image: postgres:15
+    container_name: nexusauth-postgres
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - nexusauth_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nexusauth-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      # Matches the Nginx site's existing upstream (proxy_pass
+      # http://127.0.0.1:8200) — bound to localhost only, Nginx is the
+      # only thing that reaches it directly.
+      - "127.0.0.1:8200:8000"
+    volumes:
+      # Without this, every rebuild/recreate of this container reset
+      # /app/uploads to whatever the Dockerfile's own "mkdir -p uploads"
+      # baked into the image (empty) — silently deleting every
+      # already-uploaded employee photo. Named volume instead, so uploads
+      # survive container recreation the same way nexusauth_pgdata does.
+      - nexusauth_uploads:/app/uploads
+
+volumes:
+  nexusauth_pgdata:
+  nexusauth_uploads:

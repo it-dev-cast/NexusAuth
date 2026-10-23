@@ -1,0 +1,1073 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Nexus One Authentication Service</title>
+  <link rel="icon" href="/static/branding/favicon.ico" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <!-- Opaque full-viewport curtain — visible BY DEFAULT (see .restore-
+       curtain in styles.css), not toggled on by any script. This app's
+       CSP (app/core/security_middleware.py) is script-src 'self' with no
+       'unsafe-inline'/nonce, so an inline <script> in <head> to decide
+       this before paint (an earlier attempt at this fix) is silently
+       blocked by every real browser — it never ran, which is why that
+       attempt didn't work. Defaulting the curtain to visible needs no
+       script at all: styles.css is a render-blocking stylesheet, so the
+       browser can't paint this page before that rule is already active.
+       app.js (external, so CSP-compliant, loaded at the end of body)
+       hides it — via the ordinary .hidden class — the moment it knows
+       there's no session to restore, or once restoreSession() resolves
+       one way or the other. Sits above #gate and #app; nothing
+       underneath can show through while it's up. -->
+  <div id="restore-curtain" class="restore-curtain" aria-hidden="true"></div>
+  <!-- Shown while a persisted session is being restored after a reload
+       (see restoreSession() in app.js) — without this, the page sits on
+       an empty "Total 0 / Showing 0" shell with zero feedback for
+       however long that restore takes, which reads as broken rather
+       than loading. -->
+  <div id="page-loading-bar" class="page-loading-bar hidden" aria-hidden="true"></div>
+  <div id="toast" class="toast hidden"></div>
+
+  <!-- On-screen confirmation dialog for destructive actions (revoke
+       session, deactivate company, delete employee, dispose asset) — an
+       in-app modal instead of the browser's native confirm() popup, so it
+       looks and behaves like the rest of the app. See confirmModal() in
+       app.js. -->
+  <div id="confirm-modal" class="modal-overlay hidden">
+    <div class="modal-card" role="alertdialog" aria-modal="true" aria-labelledby="confirm-modal-message">
+      <p id="confirm-modal-message"></p>
+      <div class="modal-actions">
+        <button id="confirm-modal-cancel" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Cancel</button>
+        <button id="confirm-modal-confirm" type="button" class="danger"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ Marketing site (pre-login) ============ -->
+  <div id="gate" class="site">
+    <header class="site-nav">
+      <div class="nav-inner">
+        <img class="nav-logo" src="/static/branding/casterly-logo-horizontal.png" alt="Casterly" />
+        <nav class="nav-links"></nav>
+        <button id="nav-signin" class="nav-cta hidden" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>Sign in</button>
+      </div>
+    </header>
+
+    <section class="hero">
+      <div class="hero-inner">
+        <div class="hero-copy">
+          <span class="eyebrow">Nexus One &middot; Foundation Core</span>
+          <h1>One identity for every module on the platform.</h1>
+          <p class="hero-lead">
+            The Authentication Service issues every login and every permission
+            for Nexus One &mdash; JWT-based, role-aware, and fully audited from
+            day one. No module ships its own login screen or user table.
+          </p>
+          <ul class="hero-points">
+            <li>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="M10.5 12.5 19 4M17 6l2 2M14 9l2 2"/></svg>
+              <span>HS256-signed access &amp; refresh tokens, with rotation on every refresh</span>
+            </li>
+            <li>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z"/></svg>
+              <span>Role-based access enforced identically at every API endpoint</span>
+            </li>
+            <li>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3h8a1 1 0 0 1 1 1v16l-5-3-5 3V4a1 1 0 0 1 1-1z"/><line x1="9.5" y1="8" x2="14.5" y2="8"/><line x1="9.5" y1="11" x2="14.5" y2="11"/></svg>
+              <span>Every action &mdash; success or denial &mdash; written to an immutable audit trail</span>
+            </li>
+          </ul>
+        </div>
+
+        <div class="gate-card" id="auth-card">
+          <img class="card-icon" src="/static/branding/casterly-icon-white.png" alt="Casterly" />
+          <h2>Nexus One</h2>
+          <p class="lead">Authentication &amp; Token Management</p>
+          <div class="tabs">
+            <button id="tab-login" class="tab on" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>Login</button>
+            <button id="tab-register" class="tab" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg>Register</button>
+          </div>
+          <form id="form-login" class="form">
+            <label>Email<input id="login-email" type="email" placeholder="admin@casterly.com" required /></label>
+            <label>Password<input id="login-password" type="password" placeholder="Password" required /></label>
+            <button type="submit" class="primary wide"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>Login</button>
+          </form>
+          <form id="form-register" class="form hidden">
+            <label>Full name<input id="reg-name" type="text" placeholder="Full name" /></label>
+            <label>Email<input id="reg-email" type="email" placeholder="intern.demo@casterly.com" required /></label>
+            <label>Password<input id="reg-password" type="password" placeholder="Password" required /></label>
+            <button type="submit" class="primary wide"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg>Register</button>
+          </form>
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+  <!-- ============ Signed-in dashboard ============ -->
+  <section id="app" class="app hidden">
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <!-- Single logo asset — C mark + "CASTERLY" wordmark on its own
+             solid white background (baked into the raster, not
+             transparent — see .sidebar-logo-chip in styles.css for why
+             the chip is white too). Sized by height (see .sidebar-logo)
+             since the wordmark band needs real vertical room to stay
+             readable. The white card keeps the dark-navy wordmark legible
+             against every sidebar theme, including the two dark ones,
+             without needing a second image variant. Used for both the
+             expanded and collapsed sidebar — only ever resized via CSS,
+             never swapped for a second image. -->
+        <div class="sidebar-brand-mark">
+          <div class="sidebar-logo-chip">
+            <img class="sidebar-logo" src="/static/branding/casterly-mark.png" alt="Casterly" />
+          </div>
+          <span class="sidebar-brand-text">Nexus Auth</span>
+        </div>
+        <!-- Sidebar collapse toggle — icons-only mode. State is applied
+             and persisted by initSidebarCollapse() in app.js. -->
+        <button id="btn-sidebar-collapse" class="sidebar-collapse-btn" type="button" title="Collapse sidebar" aria-label="Collapse sidebar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+      </div>
+      <nav class="sidebar-nav">
+        <button class="nav-item on" data-section="section-overview" type="button" title="Overview">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+          <span>Overview</span>
+        </button>
+        <button class="nav-item admin-only hidden" data-section="section-users" type="button" title="Users">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7" r="3"/><path d="M2 21v-2a5 5 0 0 1 5-5h4a5 5 0 0 1 5 5v2"/><circle cx="17" cy="8" r="2.2"/><path d="M21 21v-1.6a4 4 0 0 0-3-3.87"/></svg>
+          <span>Users</span>
+        </button>
+        <button class="nav-item admin-only hidden" data-section="section-companies" type="button" title="Companies">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21V5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v16"/><path d="M14 21v-9a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v9"/><path d="M2 21h20"/></svg>
+          <span>Companies</span>
+        </button>
+        <button class="nav-item admin-only hidden" data-section="section-employees" type="button" title="Employees">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M6 16c0-1.7 1.3-3 3-3s3 1.3 3 3"/><line x1="14" y1="8" x2="18" y2="8"/><line x1="14" y1="12" x2="18" y2="12"/></svg>
+          <span>Employees</span>
+        </button>
+        <button class="nav-item admin-only hidden" data-section="section-departments" type="button" title="Departments">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          <span>Departments</span>
+        </button>
+        <button class="nav-item admin-only hidden" data-section="section-job-roles" type="button" title="Job Roles">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.5 5.5L20 8.3l-4 4 1 5.7-5-2.7-5 2.7 1-5.7-4-4 5.5-.8z"/></svg>
+          <span>Job Roles</span>
+        </button>
+        <button class="nav-item admin-only hidden" data-section="section-applications" type="button" title="Applications">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><circle cx="17.5" cy="17.5" r="3.5"/></svg>
+          <span>Applications</span>
+        </button>
+        <button class="nav-item admin-only hidden" data-section="section-suppliers" type="button" title="Suppliers">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="6" width="13" height="10" rx="1"/><path d="M14 10h4l3 3v3h-7z"/><circle cx="6" cy="18" r="1.8"/><circle cx="17" cy="18" r="1.8"/></svg>
+          <span>Suppliers</span>
+        </button>
+        <button class="nav-item admin-only hidden" data-section="section-assets" type="button" title="Assets">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg>
+          <span>Assets</span>
+        </button>
+        <button class="nav-item admin-only hidden" data-section="section-manufacturers" type="button" title="Manufacturers">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="10" width="18" height="11" rx="1"/><path d="M7 10V6l4 3V6l4 3"/><line x1="17" y1="6" x2="17" y2="3"/></svg>
+          <span>Manufacturers</span>
+        </button>
+        <button class="nav-item admin-only hidden" data-section="section-asset-models" type="button" title="Models">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="9" y1="3" x2="7" y2="21"/><line x1="17" y1="3" x2="15" y2="21"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/></svg>
+          <span>Models</span>
+        </button>
+        <button class="nav-item admin-only hidden" data-section="section-audit" type="button" title="Audit log">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6a1 1 0 0 1 1 1v1H8V4a1 1 0 0 1 1-1z"/><rect x="5" y="5" width="14" height="16" rx="2"/><line x1="9" y1="11" x2="15" y2="11"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+          <span>Audit log</span>
+        </button>
+        <button class="nav-item admin-only hidden" data-section="section-events" type="button" title="Events">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>
+          <span>Events</span>
+        </button>
+        <button class="nav-item" data-section="section-sessions" type="button" title="Sessions">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+          <span>Sessions</span>
+        </button>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="person">
+          <span id="who-name">—</span>
+          <small id="who-meta">—</small>
+        </div>
+        <span id="role-badge" class="badge">user</span>
+        <button id="btn-logout" class="wide" title="Logout">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+          <span>Logout</span>
+        </button>
+      </div>
+    </aside>
+
+    <main class="content">
+      <section id="section-overview" class="page-section">
+        <!-- Minimal/premium treatment: no gradients, no icon badges — one
+             accent color used sparingly (the eyebrow label, the status
+             dot), clean typography and whitespace carry the page instead. -->
+        <div class="overview-header">
+          <div>
+            <span class="welcome-eyebrow">Identity Service</span>
+            <h1 class="page-title">Welcome back<span id="who-first-name"></span></h1>
+            <p class="page-subtitle">Foundation Core &middot; Identity Service dashboard</p>
+          </div>
+          <!-- Theme picker and status pill share a right-side column,
+               top and bottom aligned respectively (see
+               .overview-header-right in styles.css) — the picker lands on
+               the same line as "Welcome back" up top, the pill stays on
+               the same line as the subtitle below, matching the welcome
+               text block's own two-line span exactly instead of both
+               bottom-aligning together. -->
+          <div class="overview-header-right">
+            <!-- Theme picker's mount point on this page — see
+                 #theme-picker-mount below and activateSection() in app.js,
+                 which moves that one persistent element into whichever
+                 page's [data-theme-slot] is currently visible, so it
+                 always sits on the same line as that page's own heading
+                 instead of occupying a separate top-of-page row (and
+                 line) of its own. -->
+            <div class="page-head-theme-slot" data-theme-slot>
+              <div id="theme-picker-mount" class="theme-picker theme-picker-top">
+                <!-- Icon-only trigger — clicking the palette icon opens the
+                     selection panel (populateThemeSwatchPanel()/applyTheme()
+                     in app.js), which shows each theme's own swatch + name +
+                     a checkmark on the active one. The trigger itself
+                     carries no swatch/label so it reads as a single icon
+                     button. -->
+                <div class="theme-swatch-dropdown">
+                  <button type="button" id="theme-swatch-trigger" class="theme-swatch-trigger" title="Change theme" aria-label="Change theme">
+                    <svg class="theme-swatch-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22a10 10 0 1 1 0-20c5.5 0 10 4 10 8.5 0 2.5-2 4.5-4.5 4.5H15a1.5 1.5 0 0 0-1 2.6c.4.4.6.9.6 1.4a2 2 0 0 1-2 2Z"/><circle cx="6.5" cy="11.5" r="1.4"/><circle cx="9.5" cy="7.3" r="1.4"/><circle cx="14.5" cy="7.3" r="1.4"/><circle cx="17.5" cy="11.5" r="1.4"/></svg>
+                  </button>
+                  <div id="theme-swatch-panel" class="theme-swatch-panel hidden"></div>
+                </div>
+              </div>
+            </div>
+            <div class="overview-status-pill"><span class="pulse-dot"></span>All systems operational</div>
+          </div>
+        </div>
+        <hr class="overview-divider" />
+
+        <!-- Individually-elevated cards again (soft shadow + radius, the
+             app's normal resting-card treatment), each with a small
+             color-coded dot rather than a full icon badge — enough
+             accent to read as "designed", not enough to feel busy. -->
+        <span class="welcome-eyebrow admin-only hidden">System overview</span>
+        <div class="kpi-grid admin-only hidden">
+          <article class="kpi-card kpi-a"><span class="kpi-label"><span class="kpi-dot"></span>Registered users</span><strong id="kpi-users" title="">0</strong></article>
+          <article class="kpi-card kpi-b"><span class="kpi-label"><span class="kpi-dot"></span>Successful logins</span><strong id="kpi-logins">0</strong></article>
+          <article class="kpi-card kpi-c"><span class="kpi-label"><span class="kpi-dot"></span>Active sessions</span><strong id="kpi-active" title="">0</strong></article>
+          <article class="kpi-card kpi-d"><span class="kpi-label"><span class="kpi-dot"></span>Failed attempts (current)</span><strong id="kpi-failed">0</strong></article>
+          <!-- locked_until is already on every user row the overview
+               endpoint returns (see dashboard_overview() in
+               auth_service.py) and isUserLocked() already exists (used by
+               the Users CSV export) — this tile just surfaces a number
+               that was previously only visible by scanning the Users
+               table for "Locked" pills one row at a time. -->
+          <article class="kpi-card kpi-e"><span class="kpi-label"><span class="kpi-dot"></span>Locked accounts</span><strong id="kpi-locked" title="">0</strong></article>
+        </div>
+
+        <!-- Recent activity — built entirely from the overview response's
+             own `sessions` array (see dashboard_overview()), which the
+             page already fetched but never rendered anywhere. No new
+             backend endpoint; just showing data that was already in
+             hand. -->
+        <div class="card admin-only hidden">
+          <h3>Recent activity</h3>
+          <p class="hint" style="margin-top:-6px;">The most recent logins across every account. The Sessions page has the full, searchable list.</p>
+          <div id="recent-activity-table" class="table-scroll"></div>
+        </div>
+
+        <span class="welcome-eyebrow">Your session</span>
+        <section class="grid-2">
+          <div class="card">
+            <h3>Current user</h3>
+            <dl id="user-fields" class="facts"></dl>
+          </div>
+          <div class="card">
+            <h3>JWT claims</h3>
+            <dl id="claim-fields" class="facts"></dl>
+            <div class="actions">
+              <button id="btn-refresh" class="primary"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7"/><polyline points="21 3 21 9 15 9"/></svg>Refresh access token</button>
+              <button id="btn-logout-all" class="danger"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>Logout all sessions</button>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section id="section-users" class="page-section hidden">
+        <div class="page-head"><h2>Users</h2><div class="page-head-theme-slot" data-theme-slot></div></div>
+        <div class="card">
+          <div class="card-head">
+            <h3>All users</h3>
+            <div class="search-suggest-wrap">
+              <input type="search" id="users-search" class="search-input" placeholder="Search by name…" />
+              <div id="users-search-suggest" class="search-suggest-panel hidden"></div>
+            </div>
+            <button id="btn-export-users" class="outline" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Export</button>
+          </div>
+          <div id="users-table" class="table-scroll"></div>
+        </div>
+      </section>
+
+      <section id="section-companies" class="page-section hidden">
+        <div class="page-head"><h2>Companies</h2><div class="page-head-theme-slot" data-theme-slot></div></div>
+        <div class="card">
+          <div class="card-head">
+            <h3>All companies</h3>
+            <div class="search-suggest-wrap">
+              <input type="search" id="companies-search" class="search-input" placeholder="Search companies…" />
+              <div id="companies-search-suggest" class="search-suggest-panel hidden"></div>
+            </div>
+            <button id="btn-export-companies" class="outline" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Export</button>
+            <button id="btn-new-company" class="primary" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>New company</button>
+          </div>
+          <div class="inline-controls">
+            <label>Sort by
+              <select id="companies-sort">
+                <option value="created_at:desc">Latest first</option>
+                <option value="created_at:asc">Last first (oldest)</option>
+              </select>
+            </label>
+            <label>Type
+              <select id="companies-type-filter">
+                <option value="">All</option>
+                <option value="internal">Internal</option>
+                <option value="external">External</option>
+              </select>
+            </label>
+          </div>
+          <form id="form-company" class="entity-form hidden">
+            <input type="hidden" id="company-edit-id" />
+            <p class="hint" style="margin:0 0 12px;"><span class="required-mark">*</span> Required</p>
+            <div class="form-grid">
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.59 13.41 11 3.83A2 2 0 0 0 9.59 3.24L4 3a1 1 0 0 0-1 1l.24 5.59a2 2 0 0 0 .59 1.41l9.58 9.58a2 2 0 0 0 2.83 0l4.35-4.35a2 2 0 0 0 0-2.82Z"/><circle cx="7.5" cy="7.5" r="1"/></svg>Name<span class="required-mark">*</span><input id="company-name" required /></label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>Type
+                <select id="company-type">
+                  <option value="external">external</option>
+                  <option value="internal">internal</option>
+                </select>
+              </label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>Address<span class="required-mark">*</span><input id="company-address" required /></label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>Contact email<span class="required-mark">*</span><input id="company-contact-email" type="email" required /></label>
+              <!-- No maxlength here on purpose — it counts raw characters
+                   typed (letters included) before wirePhoneDigitsOnly()
+                   in app.js has a chance to strip them, so typing e.g.
+                   "abc9876543210" would hit a maxlength=10 cap after just
+                   7 real digits and silently drop the rest. The JS
+                   filter's own .slice(0, 10) on the digits-only result is
+                   the actual 10-digit cap. -->
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/></svg>Contact phone<input id="company-contact-phone" type="tel" inputmode="numeric" placeholder="10-digit number" /></label>
+            </div>
+            <div class="actions">
+              <button type="submit" class="primary" id="company-submit-btn"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Create company</button>
+              <button type="button" id="company-cancel-btn" class="outline"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Cancel</button>
+            </div>
+          </form>
+          <div id="companies-table" class="table-scroll"></div>
+        </div>
+      </section>
+
+      <section id="section-employees" class="page-section hidden">
+        <div class="page-head"><h2>Employees</h2><div class="page-head-theme-slot" data-theme-slot></div></div>
+        <div class="card">
+          <div class="card-head">
+            <h3>Employees by company</h3>
+            <div class="search-suggest-wrap">
+              <input type="search" id="employees-search" class="search-input" placeholder="Search employees…" />
+              <div id="employees-search-suggest" class="search-suggest-panel hidden"></div>
+            </div>
+            <button id="btn-export-employees" class="outline" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Export</button>
+            <button id="btn-new-employee" class="primary" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>New employee</button>
+          </div>
+          <div class="inline-controls">
+            <label>Company
+              <!-- A plain <select> here commits its value the instant a
+                   typed letter matches an option (native browser
+                   typeahead) — with 1000+ companies, typing "a" silently
+                   jumped to AND activated the first company starting with
+                   "a" before the user had actually chosen anything. This
+                   combobox wraps that same <select> (kept as the real
+                   source of truth — every other .value read/write in
+                   app.js is untouched) with a type-to-filter text input
+                   that only commits on click/Enter. See
+                   wireSearchableSelect() in app.js. -->
+              <div class="combo-select">
+                <input type="text" id="employee-company-filter-input" class="combo-input" placeholder="All companies" autocomplete="off" />
+                <div id="employee-company-filter-panel" class="search-suggest-panel hidden"></div>
+                <select id="employee-company-filter" class="hidden" aria-hidden="true" tabindex="-1"></select>
+              </div>
+            </label>
+            <label>Department
+              <select id="employee-department-filter">
+                <option value="">All</option>
+              </select>
+            </label>
+            <label class="checkbox"><input type="checkbox" id="employee-include-exited" checked /> Include exited</label>
+          </div>
+          <form id="form-employee" class="entity-form hidden">
+            <input type="hidden" id="employee-edit-id" />
+            <p class="hint" style="margin:0 0 12px;"><span class="required-mark">*</span> Required</p>
+            <div class="form-grid">
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 21V5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v16"/><path d="M14 21v-9a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v9"/><path d="M2 21h20"/></svg>Company<span class="required-mark">*</span>
+                <select id="employee-company-id" required></select>
+              </label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.5-7 8-7s8 3 8 7"/></svg>First name<span class="required-mark">*</span><input id="employee-first-name" required /></label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.5-7 8-7s8 3 8 7"/></svg>Last name<span class="required-mark">*</span><input id="employee-last-name" required /></label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>Email<span class="required-mark">*</span><input id="employee-email" type="email" required /></label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/></svg>Employee ID<input id="employee-code" placeholder="e.g. EMP-0001" /></label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 6.5 12 12 3.5 6.5"/><rect x="3" y="4" width="18" height="14" rx="2"/></svg>Designation
+                <select id="employee-designation-select">
+                  <option value="">(none)</option>
+                  <option value="Founder">Founder</option>
+                  <option value="CEO">CEO</option>
+                  <option value="CTO">CTO</option>
+                  <option value="COO">COO</option>
+                  <option value="CFO">CFO</option>
+                  <option value="Engineering Manager">Engineering Manager</option>
+                  <option value="Product Manager">Product Manager</option>
+                  <option value="Software Engineer">Software Engineer</option>
+                  <option value="Senior Software Engineer">Senior Software Engineer</option>
+                  <option value="Designer">Designer</option>
+                  <option value="Marketing Manager">Marketing Manager</option>
+                  <option value="Sales Manager">Sales Manager</option>
+                  <option value="Account Executive">Account Executive</option>
+                  <option value="Customer Support">Customer Support</option>
+                  <option value="HR Manager">HR Manager</option>
+                  <option value="Intern">Intern</option>
+                  <option value="__other__">Other (type below)…</option>
+                </select>
+              </label>
+              <label id="employee-designation-other-wrap" class="hidden"><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 6.5 12 12 3.5 6.5"/><rect x="3" y="4" width="18" height="14" rx="2"/></svg>Custom designation<input id="employee-designation-other" placeholder="Type the designation" /></label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg>Phone number<input id="employee-phone-number" type="tel" placeholder="e.g. +91 98765 43210" /></label>
+              <label class="span-2"><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>Photo
+                <!-- employee-photo-reference is the actual value that gets
+                     saved (a URL) — hidden, and filled in by JS the moment
+                     a file finishes uploading (see uploadEmployeePhoto() /
+                     employee-photo-file's onchange in app.js), or when
+                     editing an employee that already has one. The visible
+                     control is the file picker; users never type a URL. -->
+                <input type="hidden" id="employee-photo-reference" />
+                <input type="file" id="employee-photo-file" accept="image/jpeg,image/png,image/gif,image/webp,.jpg,.jpeg,.png,.gif,.webp" />
+                <span id="employee-photo-status" class="hint" style="margin:4px 0 0;"></span>
+                <div id="employee-photo-preview-wrap" class="hidden" style="margin-top:8px;">
+                  <img id="employee-photo-preview" alt="Employee photo preview" style="max-width:96px;max-height:96px;border-radius:8px;object-fit:cover;display:block;" />
+                </div>
+              </label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 8a6 6 0 0 1 6 6v7h-4v-7a2 2 0 0 0-4 0v7h-4v-7a6 6 0 0 1 6-6z"/><rect x="2" y="9" width="4" height="12"/><circle cx="4" cy="4" r="2"/></svg>LinkedIn URL<input id="employee-linkedin-url" type="url" placeholder="https://www.linkedin.com/in/…" /></label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Department
+                <select id="employee-department-select">
+                  <option value="">(none)</option>
+                  <option value="__other__">Other (type below)…</option>
+                </select>
+              </label>
+              <label id="employee-department-other-wrap" class="hidden"><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Custom department<input id="employee-department-other" placeholder="Type the department" /></label>
+              <label class="span-2"><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 10c0 7-9 13-9 13S3 17 3 10a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>Address
+                <select id="employee-address-select">
+                  <option value="">(none)</option>
+                  <option value="Tower B Beacon, 4th Floor, Brigade Twin Towers, Pipeline Road, Yeshwanthpur, Bengaluru, Karnataka 560022">Tower B Beacon, 4th Floor, Brigade Twin Towers, Pipeline Road, Yeshwanthpur, Bengaluru, Karnataka 560022</option>
+                  <option value="B-8, Ragavendra Layout, Jai Bharath Industrial Estate, Yeshwanthpur, Bengaluru, Bengaluru Urban, Karnataka, 560022.">B-8, Ragavendra Layout, Jai Bharath Industrial Estate, Yeshwanthpur, Bengaluru, Bengaluru Urban, Karnataka, 560022.</option>
+                  <option value="__other__">Other (type below)…</option>
+                </select>
+              </label>
+              <label id="employee-address-other-wrap" class="hidden span-2"><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 10c0 7-9 13-9 13S3 17 3 10a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>Custom address<input id="employee-address-other" maxlength="300" placeholder="e.g. No. 12, MG Road, Bengaluru 560001" /></label>
+              <label class="span-2"><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.5-7 8-7s8 3 8 7"/></svg>Manager (reports to)
+                <select id="employee-manager-id">
+                  <option value="">(none)</option>
+                </select>
+              </label>
+              <div class="span-2">
+                <span class="checkbox-grid-label"><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><circle cx="17.5" cy="17.5" r="3.5"/></svg>Application access</span>
+                <!-- A closed-by-default dropdown, not an always-open grid
+                     — the 24-item, 5-category checkbox list took up too
+                     much room sitting permanently expanded in the form.
+                     Click the trigger to open the panel; it stays a real
+                     multi-select checkbox list once open (see
+                     populateEmployeeApplicationCheckboxes() in app.js),
+                     just collapsed when not in use. -->
+                <div class="app-access-dropdown">
+                  <button type="button" id="employee-applications-trigger" class="app-access-trigger">
+                    <span id="employee-applications-summary">No applications selected</span>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                  </button>
+                  <div id="employee-applications-panel" class="app-access-panel hidden">
+                    <div class="checkbox-grid-bulk">
+                      <button type="button" id="employee-applications-select-all" class="link-btn"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>Select all</button>
+                      <button type="button" id="employee-applications-clear-all" class="link-btn"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Clear all</button>
+                    </div>
+                    <div id="employee-application-checkboxes" class="checkbox-grid"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="actions">
+              <button type="submit" class="primary" id="employee-submit-btn"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Create employee</button>
+              <button type="button" id="employee-cancel-btn" class="outline"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Cancel</button>
+            </div>
+          </form>
+          <p class="hint">Pick a company above to list its employees. Status transitions follow onboarded &rarr; active &harr; on_leave &rarr; exited (exited is terminal). Manager must be in the same company; a manager assignment that would create a reporting cycle is rejected.</p>
+          <div id="employees-table" class="table-scroll"></div>
+        </div>
+      </section>
+
+      <!-- Read-only "which applications can this employee open" view — the
+           Application access dropdown on the form above is for editing;
+           this is a plain dropdown for checking, not a popup, opened from
+           the "Access to" button on each employee row. One shared panel,
+           positioned next to whichever row's button was clicked (see
+           toggleEmployeeAccessPanel() in app.js) rather than one per row. -->
+      <div id="employee-access-panel" class="access-dropdown-panel hidden"></div>
+
+      <!-- Row-actions overflow — status change / link-to-user / delete used
+           to sit inline in every row (the widest things in it); they now
+           live in this anchored dropdown instead, opened from the row's
+           "More" (⋮) button. Same shared position:fixed panel pattern as
+           #employee-access-panel above (see toggleEmployeeMorePanel() in
+           app.js), just with its own content per employee. -->
+      <div id="employee-more-panel" class="access-dropdown-panel employee-more-panel hidden"></div>
+
+      <!-- Full employee profile — the Employees table itself only shows the
+           handful of columns needed to scan the list (id/name/role/
+           department/status/manager/actions); everything else (contact
+           info, work info, account/access) lives in this modal instead of
+           being crammed into the row or a small anchored dropdown. Reuses
+           the app's existing .modal-overlay/.modal-card pattern (same as
+           openDepartmentDetail()/openAssetDetail() in app.js) rather than
+           the .access-dropdown-panel above — a multi-section profile needs
+           a fixed header and close control that stay put regardless of
+           content length, not a panel that follows whichever row button
+           opened it around the screen. -->
+      <div id="employee-view-modal" class="modal-overlay hidden">
+        <div class="modal-card wide drawer" role="dialog" aria-modal="true" aria-labelledby="employee-view-title">
+          <div class="modal-head">
+            <h3 id="employee-view-title">Employee details</h3>
+            <button type="button" id="employee-view-close" class="modal-close-x" aria-label="Close">
+              <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+          <div class="modal-body">
+            <div id="employee-view-profile" class="employee-view-profile"></div>
+            <h4 class="modal-subheading">Contact</h4>
+            <dl id="employee-view-contact" class="facts"></dl>
+            <h4 class="modal-subheading">Work information</h4>
+            <dl id="employee-view-work" class="facts"></dl>
+            <h4 class="modal-subheading">Account &amp; access</h4>
+            <dl id="employee-view-account" class="facts"></dl>
+          </div>
+        </div>
+      </div>
+
+      <section id="section-departments" class="page-section hidden">
+        <div class="page-head"><h2>Departments</h2><div class="page-head-theme-slot" data-theme-slot></div></div>
+        <div class="card">
+          <div class="card-head">
+            <h3>Department master</h3>
+            <!-- Search + its "Include inactive" toggle grouped as one
+                 unit (not two separate items space-between would scatter
+                 across the row) so they stay right next to each other. -->
+            <div class="card-head-controls">
+              <div class="search-suggest-wrap">
+                <input type="search" id="departments-search" class="search-input" placeholder="Search departments…" />
+                <div id="departments-search-suggest" class="search-suggest-panel hidden"></div>
+              </div>
+              <label class="checkbox"><input type="checkbox" id="departments-include-inactive" checked /> Include inactive</label>
+            </div>
+            <button id="btn-export-departments" class="outline" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Export</button>
+            <button id="btn-new-department" class="primary" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>New department</button>
+          </div>
+          <div class="inline-controls">
+            <!-- Was labeled "Parent" — misleading, since it doesn't let
+                 you pick a specific parent department to filter by, it's
+                 a hierarchy-level filter with exactly two states. "Level"
+                 says what it actually does. -->
+            <label>Level
+              <select id="departments-parent-filter">
+                <option value="">All</option>
+                <option value="__top_level__">Top-level only</option>
+              </select>
+            </label>
+          </div>
+          <form id="form-department" class="entity-form hidden">
+            <input type="hidden" id="department-edit-id" />
+            <p class="hint" style="margin:0 0 12px;"><span class="required-mark">*</span> Required</p>
+            <div class="form-grid">
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.59 13.41 11 3.83A2 2 0 0 0 9.59 3.24L4 3a1 1 0 0 0-1 1l.24 5.59a2 2 0 0 0 .59 1.41l9.58 9.58a2 2 0 0 0 2.83 0l4.35-4.35a2 2 0 0 0 0-2.82Z"/><circle cx="7.5" cy="7.5" r="1"/></svg>Name<span class="required-mark">*</span><input id="department-name" required /></label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" y1="12" x2="16" y2="12"/></svg>Parent department
+                <select id="department-parent-select">
+                  <option value="">(none — top level)</option>
+                </select>
+              </label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.5-7 8-7s8 3 8 7"/></svg>Manager
+                <select id="department-manager-select">
+                  <option value="">(none)</option>
+                  <option value="__other__">Other (type below)…</option>
+                </select>
+              </label>
+              <label id="department-manager-other-wrap" class="hidden"><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.5-7 8-7s8 3 8 7"/></svg>Custom manager<input id="department-manager-other" placeholder="Who heads this department" /></label>
+              <label class="span-2"><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3h8a1 1 0 0 1 1 1v16l-5-3-5 3V4a1 1 0 0 1 1-1z"/><line x1="9.5" y1="8" x2="14.5" y2="8"/><line x1="9.5" y1="11" x2="14.5" y2="11"/></svg>Description<textarea id="department-description" rows="2" placeholder="What this department does"></textarea></label>
+            </div>
+            <div class="actions">
+              <button type="submit" class="primary" id="department-submit-btn"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Create department</button>
+              <button type="button" id="department-cancel-btn" class="outline"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Cancel</button>
+            </div>
+          </form>
+          <p class="hint">Shared, company-wide list used by the Employee form's Department dropdown. Deactivating one here removes it from that dropdown without affecting employees already assigned to it.</p>
+          <div id="departments-table" class="table-scroll"></div>
+        </div>
+      </section>
+
+      <div id="department-detail-modal" class="modal-overlay hidden">
+        <div class="modal-card wide" role="dialog" aria-modal="true" aria-labelledby="department-detail-title">
+          <span class="welcome-eyebrow">Departments</span>
+          <h3 id="department-detail-title">Department</h3>
+          <dl id="department-detail-facts" class="facts"></dl>
+          <div id="department-detail-children"></div>
+          <div class="modal-actions">
+            <button type="button" id="department-detail-view-employees" class="outline"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z"/><circle cx="12" cy="12" r="3"/></svg>View employees</button>
+            <button type="button" id="department-detail-close"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Close</button>
+          </div>
+        </div>
+      </div>
+
+      <section id="section-job-roles" class="page-section hidden">
+        <div class="page-head"><h2>Job Roles</h2><div class="page-head-theme-slot" data-theme-slot></div></div>
+        <div class="card">
+          <div class="card-head">
+            <h3>Job role master</h3>
+            <div class="card-head-controls">
+              <div class="search-suggest-wrap">
+                <input type="search" id="job-roles-search" class="search-input" placeholder="Search job roles…" />
+                <div id="job-roles-search-suggest" class="search-suggest-panel hidden"></div>
+              </div>
+              <label class="checkbox"><input type="checkbox" id="job-roles-include-inactive" checked /> Include inactive</label>
+            </div>
+            <button id="btn-export-job-roles" class="outline" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Export</button>
+            <button id="btn-new-job-role" class="primary" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>New job role</button>
+          </div>
+          <form id="form-job-role" class="entity-form hidden">
+            <input type="hidden" id="job-role-edit-id" />
+            <p class="hint" style="margin:0 0 12px;"><span class="required-mark">*</span> Required</p>
+            <div class="form-grid">
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>Name<span class="required-mark">*</span><input id="job-role-name" required /></label>
+            </div>
+            <div class="actions">
+              <button type="submit" class="primary" id="job-role-submit-btn"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Create job role</button>
+              <button type="button" id="job-role-cancel-btn" class="outline"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Cancel</button>
+            </div>
+          </form>
+          <p class="hint">Shared, company-wide list used by the Employee form's Job role dropdown. Not the same as a user's RBAC role (Admin/Operator/Read-only) on the Users page — this is a job title/designation. Deactivating one here removes it from that dropdown without affecting employees already assigned to it.</p>
+          <div id="job-roles-table" class="table-scroll"></div>
+        </div>
+      </section>
+
+      <section id="section-applications" class="page-section hidden">
+        <div class="page-head"><h2>Applications</h2><div class="page-head-theme-slot" data-theme-slot></div></div>
+        <div class="card">
+          <div class="card-head">
+            <h3>Application master</h3>
+            <div class="card-head-controls">
+              <div class="search-suggest-wrap">
+                <input type="search" id="applications-search" class="search-input" placeholder="Search applications…" />
+                <div id="applications-search-suggest" class="search-suggest-panel hidden"></div>
+              </div>
+              <label class="checkbox"><input type="checkbox" id="applications-include-inactive" checked /> Include inactive</label>
+            </div>
+            <button id="btn-export-applications" class="outline" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Export</button>
+            <button id="btn-new-application" class="primary" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>New application</button>
+          </div>
+          <form id="form-application" class="entity-form hidden">
+            <input type="hidden" id="application-edit-id" />
+            <p class="hint" style="margin:0 0 12px;"><span class="required-mark">*</span> Required</p>
+            <div class="form-grid">
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.59 13.41 11 3.83A2 2 0 0 0 9.59 3.24L4 3a1 1 0 0 0-1 1l.24 5.59a2 2 0 0 0 .59 1.41l9.58 9.58a2 2 0 0 0 2.83 0l4.35-4.35a2 2 0 0 0 0-2.82Z"/><circle cx="7.5" cy="7.5" r="1"/></svg>Name<span class="required-mark">*</span><input id="application-name" required /></label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>Category
+                <select id="application-category-select">
+                  <option value="">(none)</option>
+                  <option value="Core">Core</option>
+                  <option value="People">People</option>
+                  <option value="Assets">Assets</option>
+                  <option value="Operations">Operations</option>
+                  <option value="Administration">Administration</option>
+                  <option value="__other__">Other (type below)…</option>
+                </select>
+              </label>
+              <label id="application-category-other-wrap" class="hidden"><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>Custom category<input id="application-category-other" placeholder="Type the category" /></label>
+            </div>
+            <div class="actions">
+              <button type="submit" class="primary" id="application-submit-btn"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Create application</button>
+              <button type="button" id="application-cancel-btn" class="outline"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Cancel</button>
+            </div>
+          </form>
+          <p class="hint">Shared, company-wide list of applications/modules (grouped by category — Core, People, Assets, Operations, Administration, ...) an employee can be granted access to — see the grouped "Application access" checkboxes on the Employee form. Deactivating one here removes it from that checkbox list without affecting employees already granted access to it.</p>
+          <div id="applications-table" class="table-scroll"></div>
+        </div>
+      </section>
+
+      <section id="section-suppliers" class="page-section hidden">
+        <div class="page-head"><h2>Suppliers</h2><div class="page-head-theme-slot" data-theme-slot></div></div>
+        <div class="card">
+          <div class="card-head">
+            <h3>All suppliers</h3>
+            <div class="search-suggest-wrap">
+              <input type="search" id="suppliers-search" class="search-input" placeholder="Search suppliers…" />
+              <div id="suppliers-search-suggest" class="search-suggest-panel hidden"></div>
+            </div>
+            <button id="btn-export-suppliers" class="outline" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Export</button>
+            <button id="btn-new-supplier" class="primary" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>New supplier</button>
+          </div>
+          <div class="inline-controls">
+            <label>Status
+              <select id="supplier-status-filter">
+                <option value="">All</option>
+                <option value="onboarded">onboarded</option>
+                <option value="approved">approved</option>
+                <option value="suspended">suspended</option>
+              </select>
+            </label>
+          </div>
+          <form id="form-supplier" class="entity-form hidden">
+            <input type="hidden" id="supplier-edit-id" />
+            <p class="hint" style="margin:0 0 12px;"><span class="required-mark">*</span> Required</p>
+            <div class="form-grid">
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.59 13.41 11 3.83A2 2 0 0 0 9.59 3.24L4 3a1 1 0 0 0-1 1l.24 5.59a2 2 0 0 0 .59 1.41l9.58 9.58a2 2 0 0 0 2.83 0l4.35-4.35a2 2 0 0 0 0-2.82Z"/><circle cx="7.5" cy="7.5" r="1"/></svg>Name<span class="required-mark">*</span><input id="supplier-name" required /></label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>Contact email<input id="supplier-contact-email" type="email" /></label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/></svg>Contact phone<input id="supplier-contact-phone" type="tel" inputmode="numeric" placeholder="10-digit number" /></label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>Category
+                <select id="supplier-category-select">
+                  <option value="">(none)</option>
+                  <option value="Hardware">Hardware</option>
+                  <option value="Software">Software</option>
+                  <option value="Office Supplies">Office Supplies</option>
+                  <option value="Logistics">Logistics</option>
+                  <option value="Facilities">Facilities</option>
+                  <option value="Maintenance &amp; Support">Maintenance &amp; Support</option>
+                  <option value="Consulting">Consulting</option>
+                  <option value="Raw Materials">Raw Materials</option>
+                  <option value="__other__">Other (type below)…</option>
+                </select>
+              </label>
+              <label id="supplier-category-other-wrap" class="hidden"><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>Custom category<input id="supplier-category-other" placeholder="Type the category" /></label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3h8a1 1 0 0 1 1 1v16l-5-3-5 3V4a1 1 0 0 1 1-1z"/><line x1="9.5" y1="8" x2="14.5" y2="8"/><line x1="9.5" y1="11" x2="14.5" y2="11"/></svg>Terms
+                <select id="supplier-terms-select">
+                  <option value="">(none)</option>
+                  <option value="Due on Receipt">Due on Receipt</option>
+                  <option value="Net 15">Net 15</option>
+                  <option value="Net 30">Net 30</option>
+                  <option value="Net 45">Net 45</option>
+                  <option value="Net 60">Net 60</option>
+                  <option value="Net 90">Net 90</option>
+                  <option value="COD">COD (Cash on Delivery)</option>
+                  <option value="Advance Payment">Advance Payment</option>
+                  <option value="50% Advance, 50% on Delivery">50% Advance, 50% on Delivery</option>
+                  <option value="__other__">Other (type below)…</option>
+                </select>
+              </label>
+              <label id="supplier-terms-other-wrap" class="hidden"><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3h8a1 1 0 0 1 1 1v16l-5-3-5 3V4a1 1 0 0 1 1-1z"/><line x1="9.5" y1="8" x2="14.5" y2="8"/><line x1="9.5" y1="11" x2="14.5" y2="11"/></svg>Custom terms<input id="supplier-terms-other" placeholder="Type the terms" /></label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>Rating (0&ndash;5)
+                <select id="supplier-rating"><option value="">(no rating)</option><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select>
+              </label>
+            </div>
+            <div class="actions">
+              <button type="submit" class="primary" id="supplier-submit-btn"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Create supplier</button>
+              <button type="button" id="supplier-cancel-btn" class="outline"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Cancel</button>
+            </div>
+          </form>
+          <p class="hint">Status transitions: onboarded &rarr; approved &harr; suspended. A supplier must be "approved" before it can be referenced by an Asset.</p>
+          <div id="suppliers-table" class="table-scroll"></div>
+        </div>
+      </section>
+
+      <section id="section-assets" class="page-section hidden">
+        <div class="page-head"><h2>Assets</h2><div class="page-head-theme-slot" data-theme-slot></div></div>
+        <div class="card">
+          <div class="card-head">
+            <h3>All assets</h3>
+            <div class="search-suggest-wrap">
+              <input type="search" id="assets-search" class="search-input" placeholder="Search tag, manufacturer, model…" />
+              <div id="assets-search-suggest" class="search-suggest-panel hidden"></div>
+            </div>
+            <button id="btn-export-assets" class="outline" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Export</button>
+            <button id="btn-new-asset" class="primary" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>New asset</button>
+          </div>
+          <div class="inline-controls">
+            <label>Status
+              <select id="asset-status-filter">
+                <option value="">All</option>
+                <option value="registered">registered</option>
+                <option value="in_repair">in_repair</option>
+                <option value="certified">certified</option>
+                <option value="disposed">disposed</option>
+              </select>
+            </label>
+          </div>
+          <form id="form-asset" class="entity-form hidden">
+            <input type="hidden" id="asset-edit-id" />
+            <p class="hint" style="margin:0 0 12px;"><span class="required-mark">*</span> Required</p>
+            <div class="form-grid">
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.59 13.41 11 3.83A2 2 0 0 0 9.59 3.24L4 3a1 1 0 0 0-1 1l.24 5.59a2 2 0 0 0 .59 1.41l9.58 9.58a2 2 0 0 0 2.83 0l4.35-4.35a2 2 0 0 0 0-2.82Z"/><circle cx="7.5" cy="7.5" r="1"/></svg>Asset tag<span class="required-mark">*</span><input id="asset-tag" required /></label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 21V5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v16"/><path d="M14 21v-9a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v9"/><path d="M2 21h20"/></svg>Supplier<span class="required-mark">*</span>
+                <select id="asset-supplier-id" required></select>
+              </label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="10" width="18" height="11" rx="1"/><path d="M7 10V6l4 3V6l4 3"/><line x1="17" y1="6" x2="17" y2="3"/></svg>Manufacturer<span class="required-mark">*</span>
+                <select id="asset-manufacturer-select" required>
+                  <option value="">Select a manufacturer…</option>
+                  <option value="__other__">Other (type below)…</option>
+                </select>
+              </label>
+              <label id="asset-manufacturer-other-wrap" class="hidden"><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="10" width="18" height="11" rx="1"/><path d="M7 10V6l4 3V6l4 3"/><line x1="17" y1="6" x2="17" y2="3"/></svg>Custom manufacturer<input id="asset-manufacturer-other" placeholder="Type the manufacturer" /></label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="9" y1="3" x2="7" y2="21"/><line x1="17" y1="3" x2="15" y2="21"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/></svg>Model<span class="required-mark">*</span>
+                <select id="asset-model-select" required>
+                  <option value="">Select a model…</option>
+                  <option value="__other__">Other (type below)…</option>
+                </select>
+              </label>
+              <label id="asset-model-other-wrap" class="hidden"><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="9" y1="3" x2="7" y2="21"/><line x1="17" y1="3" x2="15" y2="21"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/></svg>Custom model<input id="asset-model-other" placeholder="Type the model" /></label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="9" y1="3" x2="7" y2="21"/><line x1="17" y1="3" x2="15" y2="21"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/></svg>Serial number<input id="asset-serial-number" /></label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="4" x2="4" y2="20"/><line x1="8" y1="4" x2="8" y2="20"/><line x1="11" y1="4" x2="11" y2="20"/><line x1="15" y1="4" x2="15" y2="20"/><line x1="18" y1="4" x2="18" y2="20"/><line x1="21" y1="4" x2="21" y2="20"/></svg>Barcode<input id="asset-barcode" /></label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>Purchase cost<input id="asset-purchase-cost" type="number" step="0.01" min="0" placeholder="0.00" /></label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>Current value<input id="asset-current-value" type="number" step="0.01" min="0" placeholder="0.00" /></label>
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 1.5-2.5 2-2.5 4"/></svg>Currency<input id="asset-currency" maxlength="3" placeholder="e.g. USD" style="text-transform:uppercase" /></label>
+            </div>
+            <div class="actions">
+              <button type="submit" class="primary" id="asset-submit-btn"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Register asset</button>
+              <button type="button" id="asset-cancel-btn" class="outline"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Cancel</button>
+            </div>
+          </form>
+          <p class="hint">Supplier must be "approved" first (try registering against an "onboarded" one to see the 409 rejection). Status: registered &rarr; in_repair &harr; certified, any &rarr; disposed (terminal). asset_tag is immutable after creation.</p>
+          <div id="assets-table" class="table-scroll"></div>
+        </div>
+      </section>
+
+      <!-- Asset detail — the Digital Twin facets that don't fit the plain
+           list/edit form: Tags, Attachments, and Timeline (derived from the
+           events table, see loadAssetTimeline() in app.js). Financials
+           live on the main edit form instead, alongside the other core
+           fields, since they're plain scalar columns, not a sub-resource. -->
+      <div id="asset-detail-modal" class="modal-overlay hidden">
+        <div class="modal-card wide" role="dialog" aria-modal="true" aria-labelledby="asset-detail-title">
+          <span class="welcome-eyebrow">Assets</span>
+          <h3 id="asset-detail-title">Asset</h3>
+          <dl id="asset-detail-facts" class="facts"></dl>
+
+          <h4 class="modal-subheading">Tags</h4>
+          <div id="asset-detail-tags" class="chip-row"></div>
+          <form id="form-asset-tag" class="inline-form">
+            <input id="asset-tag-input" placeholder="Add a tag…" maxlength="50" />
+            <button type="submit" class="outline"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Add tag</button>
+          </form>
+
+          <h4 class="modal-subheading">Attachments</h4>
+          <div id="asset-detail-attachments"></div>
+          <form id="form-asset-attachment" class="inline-form">
+            <select id="asset-attachment-type">
+              <option value="document">document</option>
+              <option value="photo">photo</option>
+              <option value="other">other</option>
+            </select>
+            <input id="asset-attachment-reference" placeholder="URL or path…" />
+            <input id="asset-attachment-description" placeholder="Description (optional)…" />
+            <button type="submit" class="outline">Add</button>
+          </form>
+          <p class="hint">A reference (URL/path) only &mdash; there is no file upload/storage in this build yet.</p>
+
+          <h4 class="modal-subheading">Timeline</h4>
+          <div id="asset-detail-timeline"></div>
+
+          <div class="modal-actions">
+            <button type="button" id="asset-detail-close"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Close</button>
+          </div>
+        </div>
+      </div>
+
+      <section id="section-manufacturers" class="page-section hidden">
+        <div class="page-head"><h2>Manufacturers</h2><div class="page-head-theme-slot" data-theme-slot></div></div>
+        <div class="card">
+          <div class="card-head">
+            <h3>Manufacturer master</h3>
+            <div class="card-head-controls">
+              <div class="search-suggest-wrap">
+                <input type="search" id="manufacturers-search" class="search-input" placeholder="Search manufacturers…" />
+                <div id="manufacturers-search-suggest" class="search-suggest-panel hidden"></div>
+              </div>
+              <label class="checkbox"><input type="checkbox" id="manufacturers-include-inactive" checked /> Include inactive</label>
+            </div>
+            <button id="btn-export-manufacturers" class="outline" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Export</button>
+            <button id="btn-new-manufacturer" class="primary" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>New manufacturer</button>
+          </div>
+          <form id="form-manufacturer" class="entity-form hidden">
+            <input type="hidden" id="manufacturer-edit-id" />
+            <p class="hint" style="margin:0 0 12px;"><span class="required-mark">*</span> Required</p>
+            <div class="form-grid">
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="10" width="18" height="11" rx="1"/><path d="M7 10V6l4 3V6l4 3"/><line x1="17" y1="6" x2="17" y2="3"/></svg>Name<span class="required-mark">*</span><input id="manufacturer-name" required /></label>
+            </div>
+            <div class="actions">
+              <button type="submit" class="primary" id="manufacturer-submit-btn"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Create manufacturer</button>
+              <button type="button" id="manufacturer-cancel-btn" class="outline"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Cancel</button>
+            </div>
+          </form>
+          <p class="hint">Shared list used by the Asset form's Manufacturer dropdown. Deactivating one here removes it from that dropdown without affecting assets already registered under it.</p>
+          <div id="manufacturers-table" class="table-scroll"></div>
+        </div>
+      </section>
+
+      <section id="section-asset-models" class="page-section hidden">
+        <div class="page-head"><h2>Models</h2><div class="page-head-theme-slot" data-theme-slot></div></div>
+        <div class="card">
+          <div class="card-head">
+            <h3>Model master</h3>
+            <div class="card-head-controls">
+              <div class="search-suggest-wrap">
+                <input type="search" id="asset-models-search" class="search-input" placeholder="Search models…" />
+                <div id="asset-models-search-suggest" class="search-suggest-panel hidden"></div>
+              </div>
+              <label class="checkbox"><input type="checkbox" id="asset-models-include-inactive" checked /> Include inactive</label>
+            </div>
+            <button id="btn-export-asset-models" class="outline" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Export</button>
+            <button id="btn-new-asset-model" class="primary" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>New model</button>
+          </div>
+          <form id="form-asset-model" class="entity-form hidden">
+            <input type="hidden" id="asset-model-edit-id" />
+            <p class="hint" style="margin:0 0 12px;"><span class="required-mark">*</span> Required</p>
+            <div class="form-grid">
+              <label><svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="9" y1="3" x2="7" y2="21"/><line x1="17" y1="3" x2="15" y2="21"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/></svg>Name<span class="required-mark">*</span><input id="asset-model-name" required /></label>
+            </div>
+            <div class="actions">
+              <button type="submit" class="primary" id="asset-model-submit-btn"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Create model</button>
+              <button type="button" id="asset-model-cancel-btn" class="outline"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Cancel</button>
+            </div>
+          </form>
+          <p class="hint">Shared list used by the Asset form's Model dropdown, independent of Manufacturer (picking one does not filter the other). Deactivating one here removes it from that dropdown without affecting assets already registered under it.</p>
+          <div id="asset-models-table" class="table-scroll"></div>
+        </div>
+      </section>
+
+      <section id="section-audit" class="page-section hidden">
+        <div class="page-head"><h2>Audit log</h2><div class="page-head-theme-slot" data-theme-slot></div></div>
+        <div class="card">
+          <div class="card-head">
+            <h3>Audit trail</h3>
+            <!-- Closed by default — this panel used to always take up a
+                 chunk of the page above the table even when nobody had
+                 touched a filter yet. Same "trigger reveals a panel,
+                 nothing forced open by default" pattern as the Employee
+                 form's Application access dropdown (see
+                 employee-applications-trigger in app.js); a plain
+                 show/hide toggle is enough here since this is an inline
+                 section, not a floating overlay that needs a
+                 click-outside-to-close handler. -->
+            <button id="btn-toggle-audit-filters" class="outline" type="button" aria-expanded="false" aria-controls="audit-filter-panel"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>Filters</button>
+          </div>
+          <!-- Boxed to match .inline-controls elsewhere (Employees'
+               Company/Department filters, Assets' Status filter, ...) —
+               this page's own filter row previously had no line or box
+               around it at all, unlike every other page's now-boxed
+               filter area. -->
+          <div class="filter-panel hidden" id="audit-filter-panel">
+            <div class="form-grid">
+              <label>Resource type
+                <select id="audit-resource-type">
+                  <option value="">All</option>
+                  <option value="company">company</option>
+                  <option value="employee">employee</option>
+                  <option value="supplier">supplier</option>
+                  <option value="asset">asset</option>
+                  <option value="user">user</option>
+                  <option value="auth">auth</option>
+                  <option value="rbac">rbac</option>
+                </select>
+              </label>
+              <label>Action
+                <select id="audit-action">
+                  <option value="">All</option>
+                  <option value="create">create</option>
+                  <option value="update">update</option>
+                  <option value="delete">delete</option>
+                  <option value="status_transition">status_transition</option>
+                  <option value="link_user">link_user</option>
+                  <option value="rating_recalculated">rating_recalculated</option>
+                  <option value="role_change">role_change</option>
+                  <option value="login_success">login_success</option>
+                  <option value="login_failure">login_failure</option>
+                  <option value="refresh_reuse_detected">refresh_reuse_detected</option>
+                  <option value="access_denied">access_denied</option>
+                </select>
+              </label>
+              <label>Resource id<input id="audit-resource-id" placeholder="e.g. 42" /></label>
+              <label>User id<input id="audit-user-id" placeholder="e.g. 1" /></label>
+            </div>
+            <div class="actions">
+              <button id="btn-audit-search" class="primary" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>Search</button>
+              <button id="btn-audit-clear" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Clear filters</button>
+              <button id="btn-export-audit" class="outline" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Export</button>
+            </div>
+          </div>
+          <p class="hint">This resource is read-only by design &mdash; the only writer is the app itself (see app/services/audit_service.py). PII fields (email, bank account, PAN, Aadhaar, etc.) are masked in old/new value snapshots even for admins.</p>
+          <div id="audit-table" class="table-scroll"></div>
+        </div>
+      </section>
+
+      <section id="section-events" class="page-section hidden">
+        <div class="page-head"><h2>Events</h2><div class="page-head-theme-slot" data-theme-slot></div></div>
+        <div class="card">
+          <div class="card-head">
+            <h3>Event stream</h3>
+            <!-- Same closed-by-default pattern as the Audit trail's
+                 Filters toggle right above this section in the nav. -->
+            <button id="btn-toggle-event-filters" class="outline" type="button" aria-expanded="false" aria-controls="event-filter-panel"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>Filters</button>
+          </div>
+          <div class="filter-panel hidden" id="event-filter-panel">
+            <div class="form-grid">
+              <label>Resource type
+                <select id="event-resource-type">
+                  <option value="">All</option>
+                  <option value="company">company</option>
+                  <option value="employee">employee</option>
+                  <option value="supplier">supplier</option>
+                  <option value="asset">asset</option>
+                  <option value="user">user</option>
+                  <option value="auth">auth</option>
+                  <option value="rbac">rbac</option>
+                </select>
+              </label>
+              <label>Event type<input id="event-type-filter" placeholder="e.g. asset.status_transition" /></label>
+              <label>Resource id<input id="event-resource-id" placeholder="e.g. 42" /></label>
+              <label>Company id<input id="event-company-id" placeholder="e.g. 3" /></label>
+            </div>
+            <div class="actions">
+              <button id="btn-event-search" class="primary" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>Search</button>
+              <button id="btn-event-clear" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Clear filters</button>
+              <button id="btn-export-events" class="outline" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Export</button>
+            </div>
+          </div>
+          <p class="hint">Every event mirrors an audit row 1:1 &mdash; it fires automatically whenever an action is audit-logged (see app/services/audit_service.py). Read-only by design; the only writer is the app itself. Nothing consumes this stream yet (no workflow engine is wired up) &mdash; this is the durable record ready for one later.</p>
+          <div id="events-table" class="table-scroll"></div>
+        </div>
+      </section>
+
+      <section id="section-sessions" class="page-section hidden">
+        <div class="page-head"><h2>Sessions</h2><div class="page-head-theme-slot" data-theme-slot></div></div>
+        <div class="card">
+          <div class="card-head">
+            <h3>Your sessions</h3>
+            <div class="search-suggest-wrap">
+              <input type="search" id="sessions-search" class="search-input" placeholder="Search by IP or session id…" />
+              <div id="sessions-search-suggest" class="search-suggest-panel hidden"></div>
+            </div>
+            <button id="btn-export-sessions" class="outline" type="button"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Export</button>
+          </div>
+          <p class="hint">Each login creates an auth_sessions row. Refresh rotates it. Logout revokes it and records the access-token jti.</p>
+          <div id="sessions-table" class="table-scroll"></div>
+        </div>
+      </section>
+    </main>
+  </section>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

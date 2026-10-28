@@ -63,16 +63,29 @@ const HASH_TO_SECTION = {
   users: "section-users",
   companies: "section-companies",
   employees: "section-employees",
-  departments: "section-departments",
-  "job-roles": "section-job-roles",
-  applications: "section-applications",
+  // Old addresses of the five masters that now live inside Master
+  // Management. Listed BEFORE `masters` so SECTION_TO_HASH (built below, last
+  // entry wins) gives the section the #masters address; masters.js reads the
+  // alias to pick which master to show, so #job-roles etc. still work.
+  departments: "section-masters",
+  "job-roles": "section-masters",
+  applications: "section-masters",
+  manufacturers: "section-masters",
+  models: "section-masters",
+  masters: "section-masters",
   suppliers: "section-suppliers",
   assets: "section-assets",
-  manufacturers: "section-manufacturers",
-  models: "section-asset-models",
   audit: "section-audit",
   events: "section-events",
   sessions: "section-sessions",
+  // Reports / Help Center live in their own files (reports.js, help.js) and
+  // register an on-show hook in window.NexusSections (see activateSection()
+  // below). Both are sub-routed: #reports/<report-key>?<filters>,
+  // #help/<article-id> — currentHashSection() only looks at the first
+  // path segment, so those deep links still resolve to the right section.
+  reports: "section-reports",
+  help: "section-help",
+  settings: "section-settings",
 };
 const SECTION_TO_HASH = Object.fromEntries(
   Object.entries(HASH_TO_SECTION)
@@ -82,7 +95,16 @@ const SECTION_TO_HASH = Object.fromEntries(
 SECTION_TO_HASH["section-overview"] = "overview";
 
 function currentHashSection() {
-  return HASH_TO_SECTION[location.hash.replace(/^#/, "")] || "section-overview";
+  const raw = location.hash.replace(/^#/, "");
+  // First path segment only (before "/" or "?"), so "#reports/employee-
+  // directory?status=active" resolves to the Reports section. Own-property
+  // lookups, so a hash like "#constructor" can't resolve to an inherited
+  // Object.prototype member instead of falling back to Overview.
+  const base = raw.split(/[/?]/)[0];
+  const has = (key) => Object.prototype.hasOwnProperty.call(HASH_TO_SECTION, key);
+  if (has(raw)) return HASH_TO_SECTION[raw];
+  if (has(base)) return HASH_TO_SECTION[base];
+  return "section-overview";
 }
 
 /* ============ Reload-and-restore ============
@@ -106,6 +128,8 @@ function persistSession() {
 }
 function clearPersistedSession() {
   sessionStorage.removeItem(SESSION_STORAGE_KEY);
+  // The next person to sign in on this tab starts from a clean view.
+  sessionStorage.removeItem(PAGE_STATE_KEY);
 }
 // Beyond which section was open, a handful of controls change what a
 // section actually shows (the Employees company filter, status filters,
@@ -129,21 +153,51 @@ function persistPageState() {
       sessionsSearch: $("sessions-search").value,
       departmentsSearch: $("departments-search").value,
       jobRolesSearch: $("job-roles-search").value,
-      applicationsSearch: $("applications-search").value,
       manufacturersSearch: $("manufacturers-search").value,
       assetModelsSearch: $("asset-models-search").value,
       departmentsIncludeInactive: $("departments-include-inactive").checked,
       jobRolesIncludeInactive: $("job-roles-include-inactive").checked,
-      applicationsIncludeInactive: $("applications-include-inactive").checked,
       manufacturersIncludeInactive: $("manufacturers-include-inactive").checked,
       assetModelsIncludeInactive: $("asset-models-include-inactive").checked,
       departmentsParentFilter: $("departments-parent-filter").value,
       employeeDepartmentFilter: $("employee-department-filter").value,
       companiesSort: $("companies-sort").value,
       companiesTypeFilter: $("companies-type-filter").value,
+      auditSearch: $("audit-search").value,
+      auditFilters: {
+        resourceType: $("audit-resource-type").value,
+        action: $("audit-action").value,
+        resourceId: $("audit-resource-id").value,
+        userId: $("audit-user-id").value,
+      },
+      eventsSearch: $("events-search").value,
+      eventFilters: {
+        resourceType: $("event-resource-type").value,
+        eventType: $("event-type-filter").value,
+        resourceId: $("event-resource-id").value,
+        companyId: $("event-company-id").value,
+      },
     })
   );
 }
+// Keep the saved state current as people type and pick filters, not only on
+// the app's own reloads, so a browser refresh (F5) or reopening the tab
+// restores the same view too. Saved only while signed in.
+let persistPageStateTimer = null;
+function schedulePersistPageState() {
+  if (!state.user) return;
+  clearTimeout(persistPageStateTimer);
+  persistPageStateTimer = setTimeout(persistPageState, 250);
+}
+document.addEventListener("input", (event) => {
+  if (event.target.closest("#app")) schedulePersistPageState();
+});
+document.addEventListener("change", (event) => {
+  if (event.target.closest("#app")) schedulePersistPageState();
+});
+window.addEventListener("pagehide", () => {
+  if (state.user) persistPageState();
+});
 function readPageState() {
   try {
     return JSON.parse(sessionStorage.getItem(PAGE_STATE_KEY)) || {};
@@ -202,56 +256,102 @@ function applyTheme(themeId) {
   const theme = THEMES.find((t) => t.id === themeId) || THEMES[0];
   document.documentElement.dataset.theme = theme.id;
   document.documentElement.classList.toggle("dark", theme.dark);
-  // The trigger is icon-only now (no dot/label on it) — the panel is the
-  // only place a theme's swatch/name/checkmark shows. Re-render it so the
-  // active row's highlight follows; cheap (9 rows) and only actually runs
-  // while the panel exists in the DOM.
-  if ($("theme-swatch-panel")) renderThemeSwatchPanel(theme.id);
+  // Keep the theme menu's checkmark on whatever is now active.
+  renderThemeMenu();
 }
 
-function renderThemeSwatchPanel(activeId) {
-  // The trigger itself is icon-only (no "Theme" label next to it) — this
-  // heading is the only place that word still shows, right above the
-  // options once the panel is actually open.
-  const heading = `<p class="theme-swatch-panel-heading">Theme</p>`;
-  const options = THEMES.map(
-    (t) => `<button type="button" class="theme-swatch-option${t.id === activeId ? " active" : ""}" data-theme-option="${t.id}">
-      <span class="theme-swatch-dot" style="background:${t.swatch}"></span>
-      ${t.label}
-      ${
-        t.id === activeId
-          ? `<svg class="theme-swatch-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`
-          : ""
-      }
-    </button>`
-  ).join("");
-  $("theme-swatch-panel").innerHTML = heading + options;
-  $("theme-swatch-panel").querySelectorAll("[data-theme-option]").forEach((btn) => {
-    btn.onclick = () => {
-      const themeId = btn.getAttribute("data-theme-option");
-      localStorage.setItem(THEME_STORAGE_KEY, themeId);
-      applyTheme(themeId);
-      $("theme-swatch-panel").classList.add("hidden");
-    };
-  });
+function storedThemeChoice() {
+  try {
+    return localStorage.getItem(THEME_STORAGE_KEY);
+  } catch {
+    return null;
+  }
 }
 
 function initThemeSystem() {
-  const stored = localStorage.getItem(THEME_STORAGE_KEY);
-  applyTheme(stored || systemDefaultTheme());
+  applyTheme(storedThemeChoice() || systemDefaultTheme());
+}
 
-  $("theme-swatch-trigger").onclick = (event) => {
+/* ---- Theme menu: the palette button at the top right of every page ----
+ * (#theme-menu-wrap in index.html, positioned in the content area's corner
+ * so it sits on every section). Lists THEMES plus "Use my device's
+ * setting", which forgets the stored choice and follows the OS again.
+ */
+const THEME_MENU_CHECK =
+  '<svg class="theme-menu-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>';
+
+function renderThemeMenu() {
+  const menu = $("theme-menu");
+  if (!menu) return;
+  const active = document.documentElement.dataset.theme;
+  const followingDevice = !storedThemeChoice();
+  const item = (choice, checked, inner) =>
+    `<button type="button" role="menuitemradio" aria-checked="${checked}" class="theme-menu-item${checked ? " on" : ""}" data-theme-choice="${choice}">${inner}${checked ? THEME_MENU_CHECK : ""}</button>`;
+  menu.innerHTML =
+    `<p class="theme-menu-title">Theme</p>` +
+    THEMES.map((t) =>
+      item(
+        t.id,
+        t.id === active,
+        `<span class="theme-menu-dot" style="background:${t.swatch}"></span><span class="theme-menu-name">${t.label}</span>${t.dark ? '<span class="theme-menu-tag">Dark</span>' : ""}`
+      )
+    ).join("") +
+    `<div class="theme-menu-divider" role="separator"></div>` +
+    item("device", followingDevice, `<span class="theme-menu-name">Use my device's setting</span>`);
+}
+
+function setThemeMenuOpen(open) {
+  const menu = $("theme-menu");
+  const button = $("btn-theme-menu");
+  if (!menu || !button) return;
+  menu.classList.toggle("hidden", !open);
+  button.setAttribute("aria-expanded", String(open));
+  if (open) (menu.querySelector(".theme-menu-item.on") || menu.querySelector(".theme-menu-item")).focus();
+}
+
+function chooseTheme(choice) {
+  try {
+    if (choice === "device") localStorage.removeItem(THEME_STORAGE_KEY);
+    else localStorage.setItem(THEME_STORAGE_KEY, choice);
+  } catch {
+    /* storage blocked — the theme still applies for this visit */
+  }
+  applyTheme(choice === "device" ? systemDefaultTheme() : choice);
+}
+
+function initThemeMenu() {
+  const menu = $("theme-menu");
+  const button = $("btn-theme-menu");
+  if (!menu || !button) return;
+  button.onclick = () => setThemeMenuOpen(menu.classList.contains("hidden"));
+  menu.onclick = (event) => {
+    const choice = event.target.closest("[data-theme-choice]");
+    if (!choice) return;
+    chooseTheme(choice.getAttribute("data-theme-choice"));
+    setThemeMenuOpen(false);
+    button.focus();
+  };
+  menu.onkeydown = (event) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
     event.preventDefault();
-    $("theme-swatch-panel").classList.toggle("hidden");
+    const items = [...menu.querySelectorAll(".theme-menu-item")];
+    const i = items.indexOf(document.activeElement);
+    const next = event.key === "ArrowDown" ? i + 1 : i - 1;
+    items[(next + items.length) % items.length].focus();
   };
   document.addEventListener("click", (event) => {
-    const dropdown = $("theme-swatch-trigger").closest(".theme-swatch-dropdown");
-    if (dropdown && !dropdown.contains(event.target)) {
-      $("theme-swatch-panel").classList.add("hidden");
+    if (!menu.classList.contains("hidden") && !event.target.closest("#theme-menu-wrap")) setThemeMenuOpen(false);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !menu.classList.contains("hidden")) {
+      setThemeMenuOpen(false);
+      button.focus();
     }
   });
 }
+
 initThemeSystem();
+initThemeMenu();
 
 /* ============ Sidebar collapse (icons-only) ============
  * Persisted the same way as the theme choice (localStorage, not the
@@ -296,6 +396,46 @@ function initSidebarCollapse() {
   }
 }
 initSidebarCollapse();
+
+// Sidebar groups (Workspace, People & Organisation, ...) fold up when their
+// heading is pressed; which ones are folded is remembered in this browser.
+const NAV_GROUPS_KEY = "nexusone.navGroups";
+function readCollapsedNavGroups() {
+  try {
+    return JSON.parse(localStorage.getItem(NAV_GROUPS_KEY) || "[]");
+  } catch (error) {
+    return [];
+  }
+}
+function setNavGroupCollapsed(group, collapsed) {
+  group.classList.toggle("is-collapsed", collapsed);
+  const heading = group.querySelector(".nav-heading");
+  if (heading) heading.setAttribute("aria-expanded", String(!collapsed));
+  try {
+    const set = new Set(readCollapsedNavGroups());
+    const id = heading && heading.id;
+    if (id) {
+      if (collapsed) set.add(id);
+      else set.delete(id);
+      localStorage.setItem(NAV_GROUPS_KEY, JSON.stringify([...set]));
+    }
+  } catch (error) {
+    /* storage unavailable: folding still works for this visit */
+  }
+}
+function initNavGroups() {
+  const saved = new Set(readCollapsedNavGroups());
+  document.querySelectorAll(".nav-group").forEach((group) => {
+    const heading = group.querySelector(".nav-heading");
+    if (!heading) return;
+    if (saved.has(heading.id)) {
+      group.classList.add("is-collapsed");
+      heading.setAttribute("aria-expanded", "false");
+    }
+    heading.onclick = () => setNavGroupCollapsed(group, !group.classList.contains("is-collapsed"));
+  });
+}
+initNavGroups();
 
 // Shared icon set for action buttons across the app, matching the sidebar's
 // existing SVG style (viewBox 0 0 24 24, stroke-based, currentColor). One
@@ -377,6 +517,17 @@ function factIcon(name) {
 // Digital Twin facts).
 const ISO_DATE_SHAPE = /^\d{4}-\d{2}-\d{2}/;
 
+// Every value that came from the API (names, emails, tags, IPs, ...) goes
+// through escText()/fmtHtml() before it is put into an innerHTML template:
+// these are user-entered strings, and unescaped they would render as markup.
+function escText(value) {
+  return value === null || value === undefined ? "" : escapeHtml(String(value));
+}
+// fmt() for HTML templates. fmt() itself stays plain text: CSV export uses it.
+function fmtHtml(value) {
+  return escText(fmt(value));
+}
+
 function fmt(value) {
   if (value === null || value === undefined || value === "") return "—";
   if (typeof value === "number") {
@@ -454,7 +605,7 @@ function hidePageLoading() {
 
 function facts(target, rows) {
   $(target).innerHTML = rows
-    .map(([label, value, iconName]) => `<dt>${factIcon(iconName)}${label}</dt><dd>${fmt(value)}</dd>`)
+    .map(([label, value, iconName]) => `<dt>${factIcon(iconName)}${escText(label)}</dt><dd>${fmtHtml(value)}</dd>`)
     .join("");
 }
 
@@ -542,8 +693,13 @@ function setButtonLabel(button, iconName, text) {
 // unquoted and readable when opened straight in a spreadsheet.
 function toCsv(headers, rows) {
   const escape = (value) => {
-    const str = value === null || value === undefined ? "" : String(value);
-    return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+    let str = value === null || value === undefined ? "" : String(value);
+    // A text cell starting with = + - @ (or tab/CR, or leading spaces before
+    // one) is run as a formula by Excel/Sheets. Prefix such text with ' so it
+    // opens as text — the same rule as the server's csv_cell(). Real numbers
+    // (e.g. -5) are left alone.
+    if (typeof value !== "number" && /^\s*[=+\-@\t\r]/.test(str)) str = `'${str}`;
+    return /[",\n\r]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
   };
   const lines = [headers.map(escape).join(","), ...rows.map((row) => row.map(escape).join(","))];
   // \r\n line endings — the CSV spec's own recommendation, and what keeps
@@ -662,8 +818,8 @@ function wireSearchSuggestions(inputId, panelId, getCache, fields, primaryFn, se
             const primary = primaryFn(item);
             const secondary = secondaryFn && secondaryFn(item);
             return `<button type="button" class="search-suggest-option" data-suggest-index="${i}">
-              <span class="search-suggest-primary">${primary === null || primary === undefined || primary === "" ? "—" : String(primary)}</span>
-              ${secondary ? `<span class="search-suggest-secondary">${String(secondary)}</span>` : ""}
+              <span class="search-suggest-primary">${primary === null || primary === undefined || primary === "" ? "—" : escText(primary)}</span>
+              ${secondary ? `<span class="search-suggest-secondary">${escText(secondary)}</span>` : ""}
             </button>`;
           })
           .join("")
@@ -735,7 +891,7 @@ function wireSearchableSelect(selectId, inputId, panelId) {
     const matches = (q ? options.filter((o) => o.textContent.toLowerCase().includes(q)) : options).slice(0, 50);
     highlighted = -1;
     panel.innerHTML = matches.length
-      ? matches.map((o, i) => `<button type="button" class="search-suggest-option" data-combo-index="${i}">${o.textContent}</button>`).join("")
+      ? matches.map((o, i) => `<button type="button" class="search-suggest-option" data-combo-index="${i}">${escText(o.textContent)}</button>`).join("")
       : `<p class="search-suggest-empty">No matches</p>`;
     panel.querySelectorAll("[data-combo-index]").forEach((btn, i) => {
       // mousedown, not click — fires before the input's own blur handler,
@@ -866,12 +1022,32 @@ function renderUser(payload) {
     ["expiry (exp)", claims.exp, "clock"],
     ["token_type", claims.token_type, "access"],
   ]);
-  $("who-name").textContent = payload.full_name || payload.email;
-  $("who-meta").textContent = payload.email;
+  $("who-name").textContent = payload.email;
+  $("who-meta").textContent = humanize(payload.role);
+  $("who-avatar").textContent = profileInitials(payload);
+  showProfileCompany(payload);
   $("role-badge").textContent = humanize(payload.role);
   $("role-badge").className = `badge role-${payload.role}`;
   const firstName = (payload.full_name || payload.email || "").split(/\s|@/)[0];
   $("who-first-name").textContent = firstName ? `, ${firstName}` : "";
+}
+
+function profileInitials(user) {
+  const words = (user.full_name || "").trim().split(/\s+/).filter(Boolean);
+  if (words.length >= 2) return (words[0][0] + words[words.length - 1][0]).toUpperCase();
+  const base = words[0] || (user.email || "?").split("@")[0];
+  return base.slice(0, 2).toUpperCase();
+}
+
+// "Admin · Company name" under the email. The company comes from the existing
+// companies API (a user can always read their own company); until it answers,
+// the line just shows the role.
+async function showProfileCompany(user) {
+  if (!user.company_id) return;
+  const result = await api(`/api/v1/companies/${user.company_id}`, { auth: true });
+  if (result.status === 200 && result.data.data && result.data.data.name && state.user && state.user.id === user.id) {
+    $("who-meta").textContent = `${humanize(user.role)} · ${result.data.data.name}`;
+  }
 }
 
 async function loadMe() {
@@ -895,22 +1071,152 @@ async function loadMe() {
   persistSession();
   renderUser(state.user);
   showApp();
-  // Admin-only sidebar nav items and their sections (Users, Companies,
-  // Employees, Suppliers, Assets, Audit log, plus the KPI strip) all share
-  // this one class — toggle it here instead of gating a single wrapper, now
-  // that each resource is its own top-level sidebar destination.
-  document.querySelectorAll(".admin-only").forEach((el) => {
-    el.classList.toggle("hidden", state.user.role !== "admin");
-  });
-  // loadAdmin() and loadSessions() don't depend on each other — run them
-  // concurrently instead of one after another. With every action now
-  // triggering a full reload (see reloadPage()), this chain runs on
-  // every single edit, so its latency directly determines how "slow" the
+  applyRoleUi();
+  // loadAdmin()/loadWorkspace() and loadSessions() don't depend on each
+  // other — run them concurrently instead of one after another. With every
+  // action now triggering a full reload (see reloadPage()), this chain runs
+  // on every single edit, so its latency directly determines how "slow" the
   // whole app feels.
   const tasks = [loadSessions()];
-  if (state.user.role === "admin") tasks.push(loadAdmin());
+  tasks.push(state.user.role === "admin" ? loadAdmin() : loadWorkspace());
   await Promise.all(tasks);
   return true;
+}
+
+/* ============ Role-based UI (RBAC) ============
+ * /auth/me returns `permissions` — resource -> the actions this user's role
+ * may perform, built on the server from app/core/permissions.py, the same
+ * matrix every route enforces. The UI only uses it to decide what to offer;
+ * the server still answers 403 to anything the UI gets wrong.
+ */
+function can(resource, action) {
+  const perms = (state.user && state.user.permissions) || {};
+  return (perms[resource] || []).includes(action);
+}
+
+// Controls the list/detail renderers draw (row Edit buttons, status selects,
+// Delete/Deactivate, ...). Hidden through one generated stylesheet rather
+// than a check inside every renderer, so a re-render can never bring one
+// back for a role that can't use it.
+const ACTION_CONTROLS = {
+  "company:write": ["#btn-new-company", "[data-edit-company]"],
+  "company:delete": ["[data-deactivate-company]", "[data-reactivate-company]"],
+  "employee:write": ["#btn-new-employee", "[data-edit-employee]", "#employee-more-panel .more-panel-section:has([data-status-select])"],
+  "employee:delete": ["[data-delete-employee]", "#employee-more-panel .more-panel-divider"],
+  "employee:link_user": ["#employee-more-panel .more-panel-section:has([data-link-select])"],
+  "supplier:write": ["#btn-new-supplier", "[data-edit-supplier]", "#suppliers-table .row-actions-group:has([data-status-select])"],
+  "asset:write": ["#btn-new-asset", "[data-edit-asset]", "#assets-table .row-actions-group:has([data-status-select])", "#form-asset-tag", "#form-asset-attachment", "[data-remove-tag]"],
+  "asset:delete": ["[data-delete-asset]"],
+};
+
+// Pages a non-admin can reach, with what their role allows there — drives
+// the "Your access" card and the per-page "view only" notes.
+const ROLE_AREAS = [
+  { resource: "company", label: "Companies", section: "section-companies" },
+  { resource: "employee", label: "Employees", section: "section-employees" },
+  { resource: "supplier", label: "Suppliers", section: "section-suppliers" },
+  { resource: "asset", label: "Assets", section: "section-assets" },
+];
+
+function applyRoleUi() {
+  const isAdmin = state.user.role === "admin";
+  // Users, Master Management, Audit log, Events and the system KPI strip
+  // stay administrator-only.
+  document.querySelectorAll(".admin-only").forEach((el) => el.classList.toggle("hidden", !isAdmin));
+  document.querySelectorAll(".non-admin-only").forEach((el) => el.classList.toggle("hidden", isAdmin));
+  document.querySelectorAll("[data-perm]").forEach((el) => {
+    const [resource, action] = el.getAttribute("data-perm").split(":");
+    el.classList.toggle("hidden", !can(resource, action));
+  });
+  // A sidebar group with nothing left in it disappears with its heading.
+  document.querySelectorAll(".nav-group").forEach((group) => {
+    const items = group.querySelectorAll(".nav-item");
+    if (items.length) group.classList.toggle("hidden", [...items].every((i) => i.classList.contains("hidden")));
+  });
+
+  const hiddenSelectors = Object.entries(ACTION_CONTROLS)
+    .filter(([perm]) => !can(...perm.split(":")))
+    .flatMap(([, selectors]) => selectors);
+  let style = $("rbac-style");
+  if (!style) {
+    style = document.createElement("style");
+    style.id = "rbac-style";
+    document.head.appendChild(style);
+  }
+  style.textContent = hiddenSelectors.length ? `${hiddenSelectors.join(",\n")} { display: none !important; }` : "";
+
+  ROLE_AREAS.forEach(({ resource, section }) => {
+    const header = document.querySelector(`#${section} .page-header-text`);
+    if (!header) return;
+    let note = header.querySelector(".view-only-note");
+    const viewOnly = can(resource, "read") && !can(resource, "write");
+    if (viewOnly && !note) {
+      note = document.createElement("span");
+      note.className = "view-only-note";
+      note.textContent = "View only";
+      header.querySelector("h2").after(note);
+    }
+    if (note) note.classList.toggle("hidden", !viewOnly);
+  });
+}
+
+// Operator / read-only counterpart of loadAdmin(): no /auth/overview (that's
+// admin-only), only the lists this role can read, plus the dropdown masters
+// those pages' forms and filters need.
+async function loadWorkspace() {
+  const tasks = [];
+  if (can("company", "read")) tasks.push(loadCompanies());
+  if (can("supplier", "read")) tasks.push(loadSuppliers());
+  if (can("asset", "read")) tasks.push(loadManufacturers(), loadAssetModels(), loadAssets());
+  // Departments / Job roles / Applications only feed the Employee pages'
+  // forms and filters (and loadDepartments() also lists employees for its
+  // Manager dropdown), so a role without employee access skips them.
+  if (can("employee", "read")) {
+    if (can("department", "read")) tasks.push(loadDepartments());
+    if (can("job_role", "read")) tasks.push(loadJobRoles());
+    if (can("application", "read")) tasks.push(loadApplications());
+  }
+  if (can("master_data", "read")) tasks.push(loadMasterDropdowns());
+  await Promise.all(tasks);
+  if (can("employee", "read")) await loadEmployees();
+  renderRoleOverview();
+}
+
+function renderRoleOverview() {
+  $("access-role-name").textContent = humanize(state.user.role);
+  const counts = {
+    company: () => companiesCache.length,
+    employee: () => employeesCache.length,
+    supplier: () => suppliersCache.length,
+    asset: () => assetsCache.length,
+  };
+  // Lists are fetched with limit=100, so a full page means "at least".
+  const countLabel = (n) => (n >= 100 ? `${n}+` : `${n}`);
+  const readable = ROLE_AREAS.filter((a) => can(a.resource, "read"));
+  $("role-kpi-grid").innerHTML = readable
+    .map(
+      (a, i) => `<article class="kpi-card kpi-${"abcde"[i % 5]}"><span class="kpi-label"><span class="kpi-dot"></span>${a.label}</span><strong>${countLabel(counts[a.resource]())}</strong></article>`
+    )
+    .join("");
+  const level = (resource) => {
+    if (can(resource, "delete")) return "Full access";
+    if (can(resource, "write")) return "View, create &amp; edit";
+    if (can(resource, "read")) return "View only";
+    return "No access";
+  };
+  $("access-table").innerHTML = table(
+    ["area", "access", ""],
+    ROLE_AREAS.map(
+      (a) => `<tr>
+        <td>${a.label}</td>
+        <td><span class="status-pill ${can(a.resource, "read") ? "good" : "bad"}">${level(a.resource)}</span></td>
+        <td class="row-actions">${can(a.resource, "read") ? `<button data-open-section="${a.section}">${icon("view")}Open</button>` : ""}</td>
+      </tr>`
+    ).join("")
+  );
+  $("access-table").querySelectorAll("[data-open-section]").forEach((btn) => {
+    btn.onclick = () => activateSection(btn.getAttribute("data-open-section"));
+  });
 }
 
 let usersCache = [];
@@ -949,12 +1255,12 @@ function renderUsersTable(items) {
           .map((user) => {
             const locked = isUserLocked(user);
             return `<tr>
-          <td>${user.full_name || "—"}</td>
-          <td>${user.email}</td>
+          <td>${escText(user.full_name || "—")}</td>
+          <td>${escText(user.email)}</td>
           <td>${humanize(user.role)}</td>
           <td><span class="status-pill ${locked ? "bad" : "good"}">${locked ? "Locked" : "Active"}</span></td>
           <td>${user.login_count}</td>
-          <td>${fmt(user.last_login_at)}</td>
+          <td>${fmtHtml(user.last_login_at)}</td>
           <td class="row-actions">
             <div class="row-actions-group">
               <select data-role-select="${user.id}">
@@ -1075,6 +1381,7 @@ async function loadAdmin() {
     loadDepartments(),
     loadJobRoles(),
     loadApplications(),
+    loadMasterDropdowns(),
   ]);
   // No auto-selected company here — "All companies" (the dropdown's
   // empty default value) is the Employees page's own default view now,
@@ -1097,9 +1404,9 @@ function renderRecentActivityTable(sessions) {
           .slice(0, 8)
           .map(
             (s) => `<tr>
-          <td>${s.email}</td>
-          <td>${fmt(s.created_at)}</td>
-          <td>${s.ip_address || "—"}</td>
+          <td>${escText(s.email)}</td>
+          <td>${fmtHtml(s.created_at)}</td>
+          <td>${escText(s.ip_address || "—")}</td>
           <td><span class="status-pill ${s.is_revoked ? "bad" : "good"}">${s.is_revoked ? "Revoked" : "Active"}</span></td>
         </tr>`
           )
@@ -1127,10 +1434,10 @@ function renderSessionsTable(rows) {
           .map(
             (row) => `<tr>
           <td>${row.id}</td>
-          <td>${fmt(row.created_at)}</td>
-          <td>${fmt(row.expires_at)}</td>
-          <td>${fmt(row.last_used_at)}</td>
-          <td>${row.ip_address || "—"}</td>
+          <td>${fmtHtml(row.created_at)}</td>
+          <td>${fmtHtml(row.expires_at)}</td>
+          <td>${fmtHtml(row.last_used_at)}</td>
+          <td>${escText(row.ip_address || "—")}</td>
           <td>${row.is_revoked ? "true" : "false"}</td>
           <td><button data-revoke="${row.id}">${icon("revoke")}Revoke session</button></td>
         </tr>`
@@ -1205,30 +1512,45 @@ function statusOptions(transitions, current) {
   return `<option value="">Change status to&hellip;</option>` + next.map((s) => `<option value="${s}">${s}</option>`).join("");
 }
 
-/* ---- Sidebar navigation ---- */
-// Moves the single persistent theme-picker element (#theme-picker-mount)
-// into whichever page's own heading row is currently visible — every
-// page-head/.overview-header carries a [data-theme-slot] placeholder for
-// exactly this. Replaces the old fixed breadcrumb+theme-picker bar that
-// used to sit in its own row above every page (a separate line, always in
-// the same spot regardless of section) — this way the picker always reads
-// as part of THIS page's own heading instead of a page-independent
-// toolbar. appendChild on an already-in-DOM node moves it rather than
-// cloning it, so its event listeners (wired once in initThemeSystem())
-// keep working no matter how many times it relocates.
-function relocateThemePicker(section) {
-  const slot = section.querySelector("[data-theme-slot]");
-  const mount = $("theme-picker-mount");
-  if (slot && mount) slot.appendChild(mount);
+// Shared by nav clicks and by session-restore-after-reload below, so both
+// paths show/hide sections, highlight the right nav item, and keep the URL
+// hash in sync the exact same way. Returns false if sectionId doesn't exist (or its
+// nav item isn't there), so callers can fall back to Overview.
+// Two sidebar items can open the same section: Master Management and its
+// Applications shortcut (data-hash="applications", handled by masters.js).
+// The one that lights up follows the address, so both stay honest.
+function navItemFor(sectionId) {
+  const items = [...document.querySelectorAll(`.nav-item[data-section="${sectionId}"]`)];
+  if (items.length < 2) return items[0] || null;
+  const raw = location.hash.replace(/^#/, "").split("?")[0];
+  const shortcut = items.find((i) => {
+    const h = i.getAttribute("data-hash");
+    return h && (raw === h || raw === `masters/${h.replace(/s$/, "")}`);
+  });
+  return shortcut || items.find((i) => !i.getAttribute("data-hash")) || items[0];
 }
 
-// Shared by nav clicks and by session-restore-after-reload below, so both
-// paths show/hide sections, highlight the right nav item, move the theme
-// picker into the new section's heading, and keep the URL hash in sync
-// the exact same way. Returns false if sectionId doesn't exist (or its
-// nav item isn't there), so callers can fall back to Overview.
-function activateSection(sectionId, { updateHash = true } = {}) {
-  const navItem = document.querySelector(`.nav-item[data-section="${sectionId}"]`);
+function syncMasterNav() {
+  const section = $("section-masters");
+  if (!section || section.classList.contains("hidden")) return;
+  const item = navItemFor("section-masters");
+  document.querySelectorAll('.nav-item[data-section="section-masters"]').forEach((i) => i.classList.toggle("on", i === item));
+}
+window.syncMasterNav = syncMasterNav;
+
+function activateSection(sectionId, { updateHash = true, hash = null } = {}) {
+  if (hash && updateHash && location.hash !== "#" + hash) location.hash = "#" + hash;
+  if (hash) updateHash = false;
+  let navItem = navItemFor(sectionId);
+  // A page whose sidebar item is hidden for this role (typed or bookmarked
+  // #users, #employees, ...) falls back to Overview. Only once the role is
+  // known — the reload path switches pages optimistically before loadMe(),
+  // while every gated item is still hidden, and re-checks afterwards.
+  if (state.user && navItem && navItem.classList.contains("hidden")) {
+    sectionId = "section-overview";
+    navItem = navItemFor(sectionId);
+    updateHash = true;
+  }
   const section = $(sectionId);
   if (!navItem || !section) return false;
   document.querySelectorAll(".nav-item").forEach((t) => t.classList.remove("on"));
@@ -1242,17 +1564,26 @@ function activateSection(sectionId, { updateHash = true } = {}) {
   // should start clean when you arrive at it, same as a fresh load.
   document.querySelectorAll(".entity-form").forEach((f) => f.classList.add("hidden"));
   navItem.classList.add("on");
+  // A page opened from elsewhere (a link, Back/Forward) must not hide inside
+  // a collapsed sidebar group.
+  const navGroup = navItem.closest(".nav-group");
+  if (navGroup && navGroup.classList.contains("is-collapsed")) setNavGroupCollapsed(navGroup, false);
   section.classList.remove("hidden");
-  relocateThemePicker(section);
   if (updateHash) {
     const hash = "#" + (SECTION_TO_HASH[sectionId] || "overview");
     if (location.hash !== hash) location.hash = hash;
   }
+  // Sections that render themselves from the URL (Reports, Help Center)
+  // register a hook here instead of app.js knowing about their internals.
+  // It's called on every activation, including Back/Forward within the same
+  // section, so a hook must be cheap and idempotent.
+  const hook = window.NexusSections && window.NexusSections[sectionId];
+  if (typeof hook === "function") hook();
   return true;
 }
 
 document.querySelectorAll(".nav-item").forEach((item) => {
-  item.onclick = () => activateSection(item.getAttribute("data-section"));
+  item.onclick = () => activateSection(item.getAttribute("data-section"), { hash: item.getAttribute("data-hash") });
 });
 
 // The browser's own Back/Forward buttons (top-left of the browser
@@ -1311,10 +1642,10 @@ async function loadCompanies() {
   // rejects a duplicate with a 409), so a "(#123)" suffix wasn't
   // disambiguating anything, just cluttering every company reference in
   // the Employees page's Company filter/form dropdown.
-  const options = items.map((c) => `<option value="${c.id}">${c.name}</option>`).join("");
+  const options = items.map((c) => `<option value="${c.id}">${escText(c.name)}</option>`).join("");
   const activeOptions = items
     .filter((c) => c.is_active)
-    .map((c) => `<option value="${c.id}">${c.name}</option>`)
+    .map((c) => `<option value="${c.id}">${escText(c.name)}</option>`)
     .join("");
   const filter = $("employee-company-filter");
   const formSelect = $("employee-company-id");
@@ -1364,10 +1695,10 @@ function renderCompaniesTable(items) {
           .map(
             (c) => `<tr>
           <td>${c.id}</td>
-          <td>${c.name}</td>
+          <td>${escText(c.name)}</td>
           <td>${humanize(c.company_type)}</td>
-          <td>${fmt(c.contact_email)}</td>
-          <td>${fmt(c.contact_phone)}</td>
+          <td>${fmtHtml(c.contact_email)}</td>
+          <td>${fmtHtml(c.contact_phone)}</td>
           <td><span class="status-pill ${c.is_active ? "good" : "bad"}">${c.is_active ? "Active" : "Inactive"}</span></td>
           <td class="row-actions">
             <!-- Editing a deactivated company isn't offered any more —
@@ -1517,7 +1848,7 @@ async function loadEmployees() {
 // actually matches against server-side (name, email, employee_code,
 // designation), plus department/status for the client-side-only
 // filter/suggestions/export paths below.
-const EMPLOYEE_SEARCH_FIELDS = ["full_name", "email", "employee_code", "designation", "department", "status"];
+const EMPLOYEE_SEARCH_FIELDS = ["full_name", "email", "employee_code", "designation", "job_role", "department", "status"];
 
 $("employees-search").oninput = () => {
   renderEmployeesTable(filterItems(employeesCache, $("employees-search").value, EMPLOYEE_SEARCH_FIELDS));
@@ -1531,7 +1862,7 @@ wireSearchSuggestions(
   (e) => e.email
 );
 wireCsvExport("btn-export-employees", {
-  headers: ["id", "name", "company", "email", "employee_code", "designation", "department", "phone_number", "linkedin_url", "address", "status", "manager_id"],
+  headers: ["id", "name", "company", "email", "employee_code", "job_role", "department", "phone_number", "linkedin_url", "address", "status", "manager_id"],
   getFilteredItems: () => filterItems(employeesCache, $("employees-search").value, EMPLOYEE_SEARCH_FIELDS),
   rowMapper: (e) => [
     e.id,
@@ -1539,7 +1870,7 @@ wireCsvExport("btn-export-employees", {
     companyName(e.company_id),
     e.email,
     e.employee_code || "",
-    e.designation || "",
+    employeeJobRole(e),
     e.department || "",
     e.phone_number || "",
     e.linkedin_url || "",
@@ -1571,12 +1902,12 @@ function linkUserControl(e) {
   const eligible = usersCache.filter((u) => u.company_id === e.company_id && !linkedElsewhere.has(u.id));
   if (!eligible.length) {
     const label = "No unlinked users in this company";
-    return `<span class="hint" style="margin:0;" title="${label}">${label}</span>`;
+    return `<span class="hint" style="margin:0;" title="${escText(label)}">${escText(label)}</span>`;
   }
   return `
     <select data-link-select="${e.id}">
       <option value="">Link to user…</option>
-      ${eligible.map((u) => `<option value="${u.id}">${u.full_name || u.email} (${u.email})</option>`).join("")}
+      ${eligible.map((u) => `<option value="${u.id}">${escText(u.full_name || u.email)} (${escText(u.email)})</option>`).join("")}
     </select>
     <button class="icon-btn" data-link-apply="${e.id}" title="Link to this user">${icon("link")}</button>
   `;
@@ -1617,13 +1948,13 @@ function tdClip(value) {
 
 function renderEmployeesTable(items) {
   $("employees-table").innerHTML = table(
-    ["id", "employee", "designation", "department", "status", "manager", ""],
+    ["id", "employee", "job role", "department", "status", "manager", ""],
     items.length
       ? items
           .map((e) => {
             const safeName = escapeHtml(e.full_name);
             const isExited = e.status === "exited";
-            const roleLabel = e.designation || "—";
+            const roleLabel = employeeJobRole(e) || "—";
             const managerLabel = employeeManagerLabel(e.manager_id, items);
             return `<tr>
           <td>${e.id}</td>
@@ -1714,7 +2045,7 @@ function renderEmployeesTable(items) {
       $("employee-last-name").value = e.last_name;
       $("employee-email").value = e.email;
       $("employee-code").value = e.employee_code || "";
-      setSelectOrOther($("employee-designation-select"), $("employee-designation-other-wrap"), $("employee-designation-other"), e.designation || "");
+      setSelectOrOther($("employee-designation-select"), $("employee-designation-other-wrap"), $("employee-designation-other"), employeeJobRole(e));
       $("employee-phone-number").value = e.phone_number || "";
       $("employee-photo-reference").value = e.photo_reference || "";
       $("employee-photo-file").value = "";
@@ -1735,7 +2066,23 @@ function renderEmployeesTable(items) {
   });
 }
 
-// Designation / Department are a fixed dropdown list plus an "Other" option
+// "Job role" is what the Employee screens call an employee's job title. It
+// is saved to BOTH the designation and job_role fields, so everything that
+// reads either — the Job Roles page's employee counts, the "Employees by Job
+// Role" report, the list below — agrees. For employees saved before this,
+// whichever field holds a real role is shown (job_role's default "Employee"
+// is not a role anyone chose, so it isn't shown or pre-selected).
+function employeeJobRole(e) {
+  return e.designation || (e.job_role && e.job_role !== "Employee" ? e.job_role : "");
+}
+function employeeJobRolePayload() {
+  const value = getSelectOrOther($("employee-designation-select"), $("employee-designation-other"));
+  // Clearing the dropdown clears the title but leaves job_role alone (it
+  // can't be empty — the server defaults it).
+  return value ? { designation: value, job_role: value } : { designation: null };
+}
+
+// Job role / Department are a dropdown list plus an "Other" option
 // that reveals a free-text field — covers the common cases with a click,
 // without losing the ability to enter something not on the list (or to
 // edit an existing record whose value predates the list).
@@ -1874,7 +2221,7 @@ function fillManagerOptions(employees, excludeEmployeeId) {
     `<option value="">(none)</option>` +
     employees
       .filter((other) => String(other.id) !== String(excludeEmployeeId))
-      .map((other) => `<option value="${other.id}">${other.full_name} (#${other.id})</option>`)
+      .map((other) => `<option value="${other.id}">${escText(other.full_name)} (#${other.id})</option>`)
       .join("");
 }
 
@@ -1944,7 +2291,7 @@ $("form-employee").onsubmit = async (event) => {
             last_name: $("employee-last-name").value,
             email: $("employee-email").value,
             employee_code: $("employee-code").value || null,
-            designation: getSelectOrOther($("employee-designation-select"), $("employee-designation-other")) || null,
+            ...employeeJobRolePayload(),
             phone_number: $("employee-phone-number").value || null,
             photo_reference: $("employee-photo-reference").value || null,
             linkedin_url: $("employee-linkedin-url").value || null,
@@ -1963,7 +2310,7 @@ $("form-employee").onsubmit = async (event) => {
             last_name: $("employee-last-name").value,
             email: $("employee-email").value,
             employee_code: $("employee-code").value || null,
-            designation: getSelectOrOther($("employee-designation-select"), $("employee-designation-other")) || null,
+            ...employeeJobRolePayload(),
             phone_number: $("employee-phone-number").value || null,
             photo_reference: $("employee-photo-reference").value || null,
             linkedin_url: $("employee-linkedin-url").value || null,
@@ -2002,11 +2349,57 @@ function populateMasterDataSelect(selectEl, items) {
   const optionEls = Array.from(selectEl.options);
   const firstSentinel = optionEls[0];
   const lastSentinel = optionEls[optionEls.length - 1];
-  const middle = items.map((item) => `<option value="${item.name}">${item.name}</option>`).join("");
+  const middle = items
+    .map((item) => `<option value="${escapeHtml(item.name)}">${escapeHtml(item.name)}</option>`)
+    .join("");
   selectEl.innerHTML = firstSentinel.outerHTML + middle + lastSentinel.outerHTML;
   if (prev && Array.from(selectEl.options).some((o) => o.value === prev)) {
     selectEl.value = prev;
   }
+}
+
+
+/* ---- Master list dropdowns ----
+ * Supplier category, Supplier terms and Application category are filled from
+ * the list masters on the Master Management page
+ * (/api/v1/master-data/<list>/options — active values only), so a change
+ * there shows up here with no code change. Each keeps its "Other (type
+ * below)" escape hatch, so existing records and free-text values still work.
+ * masters.js calls loadMasterDropdowns() after every change on that page.
+ */
+const MASTER_DROPDOWNS = [
+  { type: "supplier_category", select: "supplier-category-select" },
+  { type: "payment_terms", select: "supplier-terms-select" },
+  { type: "application_category", select: "application-category-select" },
+];
+
+function fillMasterSelect(selectEl, items) {
+  const prev = selectEl.value;
+  const optionEls = Array.from(selectEl.options);
+  const first = optionEls[0] ? optionEls[0].outerHTML : '<option value="">(none)</option>';
+  const last = optionEls[optionEls.length - 1].outerHTML; // "Other (type below)…"
+  const middle = items
+    .map((item) => `<option value="${escapeHtml(item.name)}">${escapeHtml(item.name)}</option>`)
+    .join("");
+  selectEl.innerHTML = first + middle + last;
+  if (prev && Array.from(selectEl.options).some((o) => o.value === prev)) selectEl.value = prev;
+}
+
+async function loadMasterDropdowns() {
+  await Promise.all(
+    MASTER_DROPDOWNS.map(async ({ type, select }) => {
+      const selectEl = $(select);
+      if (!selectEl) return;
+      // A failed fetch just leaves that dropdown as it was.
+      try {
+        const result = await api(`/api/v1/master-data/${type}/options`, { auth: true });
+        if (result.status !== 200) return;
+        fillMasterSelect(selectEl, result.data.data.items || []);
+      } catch (error) {
+        /* keep the existing options */
+      }
+    })
+  );
 }
 
 // Application access is a multi-pick (any number checked at once), unlike
@@ -2027,7 +2420,7 @@ function populateEmployeeApplicationCheckboxes(applications, checkedIds = []) {
         .map(
           (a) => `<label class="checkbox">
         <input type="checkbox" value="${a.id}" data-application-checkbox ${checked.has(a.id) ? "checked" : ""} />
-        ${a.name}
+        ${escText(a.name)}
       </label>`
         )
         .join("")
@@ -2093,7 +2486,7 @@ function populateDepartmentParentSelect() {
   const options = allDepartmentsCache.filter((d) => d.is_active && !excluded.has(d.id));
   select.innerHTML =
     '<option value="">(none — top level)</option>' +
-    options.map((d) => `<option value="${d.id}">${d.name}</option>`).join("");
+    options.map((d) => `<option value="${d.id}">${escText(d.name)}</option>`).join("");
   if (prev && Array.from(select.options).some((o) => o.value === prev)) select.value = prev;
 }
 
@@ -2102,7 +2495,7 @@ function populateDepartmentsParentFilter() {
   const prev = select.value;
   const deptOptions = allDepartmentsCache
     .filter((d) => d.is_active)
-    .map((d) => `<option value="${d.id}">Belongs to: ${d.name}</option>`)
+    .map((d) => `<option value="${d.id}">Belongs to: ${escText(d.name)}</option>`)
     .join("");
   select.innerHTML =
     '<option value="">All</option><option value="__top_level__">Top-level only</option>' + deptOptions;
@@ -2114,7 +2507,7 @@ function populateEmployeeDepartmentFilter() {
   const prev = select.value;
   const options = allDepartmentsCache
     .filter((d) => d.is_active)
-    .map((d) => `<option value="${d.name}">${d.name}</option>`)
+    .map((d) => `<option value="${escText(d.name)}">${escText(d.name)}</option>`)
     .join("");
   select.innerHTML = '<option value="">All</option>' + options;
   if (prev && Array.from(select.options).some((o) => o.value === prev)) select.value = prev;
@@ -2135,7 +2528,8 @@ async function loadDepartments() {
     api("/api/v1/departments?limit=100&include_inactive=true", { auth: true }),
     // Backs this form's own Manager dropdown — see allEmployeesCache above
     // for why it's a dedicated fetch rather than reusing employeesCache.
-    api("/api/v1/employees?limit=100", { auth: true }),
+    // Skipped for roles that can't read employees (it would only 403).
+    can("employee", "read") ? api("/api/v1/employees?limit=100", { auth: true }) : { status: 0 },
   ]);
   if (tableResult.status !== 200) return [];
   departmentsCache = tableResult.data.data.items || [];
@@ -2164,7 +2558,7 @@ function populateDepartmentManagerSelect() {
   const select = $("department-manager-select");
   const prev = select.value;
   const middle = allEmployeesCache
-    .map((e) => `<option value="${e.full_name}">${e.full_name} (#${e.id})</option>`)
+    .map((e) => `<option value="${escText(e.full_name)}">${escText(e.full_name)} (#${e.id})</option>`)
     .join("");
   select.innerHTML = `<option value="">(none)</option>${middle}<option value="__other__">Other (type below)…</option>`;
   if (prev && Array.from(select.options).some((o) => o.value === prev)) select.value = prev;
@@ -2195,8 +2589,8 @@ function renderDepartmentsTable(items) {
           .map(
             (d) => `<tr>
           <td>${d.id}</td>
-          <td>${d.name}</td>
-          <td>${d.parent_department_name || "—"}</td>
+          <td>${escText(d.name)}</td>
+          <td>${escText(d.parent_department_name || "—")}</td>
           <td><span class="status-pill ${d.is_active ? "good" : "bad"}">${d.is_active ? "Active" : "Inactive"}</span></td>
           <td>${d.employee_count ?? 0}</td>
           <td class="row-actions">
@@ -2319,7 +2713,7 @@ function toggleEmployeeAccessPanel(button, employee) {
   // panel as a real, populated access list.
   panel.classList.toggle("is-empty", !names.length);
   panel.innerHTML = names.length
-    ? `<ul class="access-chip-list">${names.map((n) => `<li class="access-chip">${n}</li>`).join("")}</ul>`
+    ? `<ul class="access-chip-list">${names.map((n) => `<li class="access-chip">${escText(n)}</li>`).join("")}</ul>`
     : `<p class="access-empty">No access</p>`;
   panel.dataset.forEmployee = employee.id;
   panel.classList.remove("hidden");
@@ -2445,7 +2839,7 @@ function employeeLinkedUserLabel(employee) {
 // in index.html) — photo (or a placeholder), name, role, and status at a
 // glance before the sectioned facts below it.
 function renderEmployeeViewProfile(employee) {
-  const roleLine = employee.designation || "—";
+  const roleLine = employeeJobRole(employee) || "—";
   const photo = employee.photo_reference
     ? `<img class="employee-view-photo" src="${escapeHtml(withBasePath(employee.photo_reference))}" alt="" />`
     : `<div class="employee-view-photo employee-view-photo-placeholder">${icon("user")}</div>`;
@@ -2467,29 +2861,23 @@ function openEmployeeViewModal(employee) {
   hideEmployeeAccessPanel();
   hideEmployeeMorePanel();
   renderEmployeeViewProfile(employee);
-  // facts() interpolates its values as-is (see its own definition) — every
-  // one of these is free-text an employee record can hold, so each is
-  // escaped here first rather than trusting facts() to do it.
-  const esc = (v) => (v == null || v === "" ? v : escapeHtml(String(v)));
+  // facts() escapes every value itself, so these are passed as plain text.
   facts("employee-view-contact", [
-    ["Email", esc(employee.email), "mail"],
-    ["Phone", esc(employee.phone_number), "phone"],
-    ["LinkedIn", esc(employee.linkedin_url), "link"],
-    ["Address", esc(employee.address), "mappin"],
+    ["Email", employee.email, "mail"],
+    ["Phone", employee.phone_number, "phone"],
+    ["LinkedIn", employee.linkedin_url, "link"],
+    ["Address", employee.address, "mappin"],
   ]);
   facts("employee-view-work", [
-    ["Employee ID", esc(employee.employee_code), "hash"],
-    ["Company", esc(companyName(employee.company_id)), "building"],
-    ["Department", esc(employee.department), "layers"],
-    ["Designation", esc(employee.designation), "briefcase"],
-    ["Manager", esc(employeeManagerLabel(employee.manager_id, employeesCache)), "user"],
+    ["Employee ID", employee.employee_code, "hash"],
+    ["Company", companyName(employee.company_id), "building"],
+    ["Department", employee.department, "layers"],
+    ["Job role", employeeJobRole(employee), "briefcase"],
+    ["Manager", employeeManagerLabel(employee.manager_id, employeesCache), "user"],
   ]);
-  const accessLabel =
-    employee.application_names && employee.application_names.length ? employee.application_names.join(", ") : "No access";
-  facts("employee-view-account", [
-    ["Linked user", esc(employeeLinkedUserLabel(employee)), "user"],
-    ["App access", esc(accessLabel), "shield"],
-  ]);
+  facts("employee-view-account", [["Linked user", employeeLinkedUserLabel(employee), "user"]]);
+  // Applications this employee holds (with status and dates; admins can change them) — applications.js.
+  if (window.NexusApplications) window.NexusApplications.renderEmployeeApps(employee);
   $("employee-view-modal").classList.remove("hidden");
 }
 function closeEmployeeViewModal() {
@@ -2543,7 +2931,7 @@ function openDepartmentDetail(department) {
   const children = allDepartmentsCache.filter((d) => d.parent_department_id === department.id);
   $("department-detail-children").innerHTML = children.length
     ? `<p class="hint" style="margin:14px 0 6px;">Sub-departments (${children.length})</p><ul>${children
-        .map((c) => `<li>${c.name} — ${c.employee_count ?? 0} ${c.employee_count === 1 ? "person" : "people"}</li>`)
+        .map((c) => `<li>${escText(c.name)} — ${c.employee_count ?? 0} ${c.employee_count === 1 ? "person" : "people"}</li>`)
         .join("")}</ul>`
     : "";
   $("department-detail-view-employees").onclick = () => {
@@ -2623,6 +3011,16 @@ async function loadJobRoles() {
   if (result.status !== 200) return [];
   jobRolesCache = result.data.data.items || [];
   renderJobRolesTable(filterItems(jobRolesCache, $("job-roles-search").value, ["name"]));
+  // The Employee form's Job role dropdown is this master list — active roles
+  // only, whatever the table above is showing. Every add / edit / activate /
+  // deactivate on this master ends in reloadPage(), which runs this function
+  // again, so the dropdown always matches. A value an employee already has
+  // that is no longer listed (renamed, deactivated, or typed via "Other") is
+  // shown under "Other" by setSelectOrOther, so it isn't lost on edit.
+  populateMasterDataSelect(
+    $("employee-designation-select"),
+    jobRolesCache.filter((r) => r.is_active)
+  );
   return jobRolesCache;
 }
 
@@ -2647,7 +3045,7 @@ function renderJobRolesTable(items) {
           .map(
             (r) => `<tr>
           <td>${r.id}</td>
-          <td>${r.name}</td>
+          <td>${escText(r.name)}</td>
           <td><span class="status-pill ${r.is_active ? "good" : "bad"}">${r.is_active ? "Active" : "Inactive"}</span></td>
           <td>${r.employee_count ?? 0}</td>
           <td class="row-actions">
@@ -2738,160 +3136,24 @@ $("form-job-role").onsubmit = async (event) => {
   });
 };
 
-/* ---- Applications (master data feeding the Employee form's Application
- * access checkboxes) — structurally identical to Job Roles above (same
- * id/name/is_active shape), except the Employee-form side is a multi-pick
- * checkbox grid instead of a single-pick dropdown; see
- * populateEmployeeApplicationCheckboxes / getCheckedApplicationIds above.
+/* ---- Applications ----
+ * applicationsCache holds the ACTIVE applications that feed the Employee
+ * form's Application access checkboxes (see populateEmployeeApplicationCheckboxes
+ * / getCheckedApplicationIds above). The Application Master screen itself
+ * (search, filters, paging, add/edit, access management) lives in
+ * applications.js and is refreshed from here through NexusApplications.reload().
  */
 let applicationsCache = [];
 
 async function loadApplications() {
-  $("applications-table").innerHTML = skeletonTable();
-  const includeInactive = $("applications-include-inactive").checked;
-  const result = await api(`/api/v1/applications?limit=100&include_inactive=${includeInactive}`, { auth: true });
-  if (result.status !== 200) return [];
-  applicationsCache = result.data.data.items || [];
-  renderApplicationsTable(filterItems(applicationsCache, $("applications-search").value, ["name"]));
-  populateEmployeeApplicationCheckboxes(applicationsCache, getCheckedApplicationIds());
+  const result = await api("/api/v1/applications?limit=100&status=active", { auth: true });
+  if (result.status === 200) {
+    applicationsCache = result.data.data.items || [];
+    populateEmployeeApplicationCheckboxes(applicationsCache, getCheckedApplicationIds());
+  }
+  if (window.NexusApplications) window.NexusApplications.reload();
   return applicationsCache;
 }
-
-$("applications-search").oninput = () => {
-  renderApplicationsTable(filterItems(applicationsCache, $("applications-search").value, ["name"]));
-};
-wireSearchSuggestions(
-  "applications-search",
-  "applications-search-suggest",
-  () => applicationsCache,
-  ["name"],
-  (a) => a.name,
-  (a) => (a.is_active ? "" : "inactive")
-);
-
-$("applications-include-inactive").onchange = loadApplications;
-wireCsvExport("btn-export-applications", {
-  headers: ["id", "name", "category", "status", "people"],
-  getFilteredItems: () => filterItems(applicationsCache, $("applications-search").value, ["name"]),
-  rowMapper: (a) => [a.id, a.name, a.category || "", a.is_active ? "Active" : "Inactive", a.employee_count ?? 0],
-  filenamePrefix: "applications",
-});
-
-function renderApplicationsTable(items) {
-  $("applications-table").innerHTML = table(
-    ["id", "name", "category", "status", "people", ""],
-    items.length
-      ? items
-          .map(
-            (a) => `<tr>
-          <td>${a.id}</td>
-          <td>${a.name}</td>
-          <td>${a.category || "—"}</td>
-          <td><span class="status-pill ${a.is_active ? "good" : "bad"}">${a.is_active ? "Active" : "Inactive"}</span></td>
-          <td>${a.employee_count ?? 0}</td>
-          <td class="row-actions">
-            <div class="row-actions-group">
-              ${a.is_active ? `<button data-edit-application="${a.id}">${icon("edit")}Edit</button>` : ""}
-              ${
-                a.is_active
-                  ? `<button class="danger" data-deactivate-application="${a.id}">${icon("deactivate")}Deactivate</button>`
-                  : `<button data-reactivate-application="${a.id}">${icon("reactivate")}Reactivate</button>`
-              }
-            </div>
-          </td>
-        </tr>`
-          )
-          .join("")
-      : null,
-    "No applications match this search."
-  );
-  $("applications-table").querySelectorAll("[data-edit-application]").forEach((btn) => {
-    btn.onclick = () => {
-      const a = items.find((x) => String(x.id) === btn.getAttribute("data-edit-application"));
-      if (!a) return;
-      $("application-edit-id").value = a.id;
-      $("application-name").value = a.name;
-      setSelectOrOther(
-        $("application-category-select"),
-        $("application-category-other-wrap"),
-        $("application-category-other"),
-        a.category || ""
-      );
-      setButtonLabel($("application-submit-btn"), "check", "Save changes");
-      $("form-application").classList.remove("hidden");
-      $("form-application").scrollIntoView({ behavior: "smooth", block: "center" });
-    };
-  });
-  $("applications-table").querySelectorAll("[data-deactivate-application]").forEach((btn) => {
-    btn.onclick = async () => {
-      if (!(await confirmModal("Deactivate this application?"))) return;
-      const result = await api(`/api/v1/applications/${btn.getAttribute("data-deactivate-application")}`, {
-        method: "DELETE",
-        auth: true,
-      });
-      if (result.status === 200) {
-        toast("Application deactivated.", "ok");
-        reloadPage();
-      }
-    };
-  });
-  $("applications-table").querySelectorAll("[data-reactivate-application]").forEach((btn) => {
-    btn.onclick = async () => {
-      if (!(await confirmModal("Reactivate this application?"))) return;
-      const result = await api(`/api/v1/applications/${btn.getAttribute("data-reactivate-application")}/reactivate`, {
-        method: "PATCH",
-        auth: true,
-      });
-      if (result.status === 200) {
-        toast("Application reactivated.", "ok");
-        reloadPage();
-      }
-    };
-  });
-}
-
-function resetApplicationForm() {
-  $("form-application").reset();
-  $("application-edit-id").value = "";
-  $("application-category-other-wrap").classList.add("hidden");
-  setButtonLabel($("application-submit-btn"), "plus", "Create application");
-}
-
-$("application-category-select").onchange = () => {
-  $("application-category-other-wrap").classList.toggle(
-    "hidden",
-    $("application-category-select").value !== "__other__"
-  );
-};
-$("btn-new-application").onclick = () => {
-  resetApplicationForm();
-  $("form-application").classList.remove("hidden");
-};
-$("application-cancel-btn").onclick = () => {
-  $("form-application").classList.add("hidden");
-  resetApplicationForm();
-};
-$("form-application").onsubmit = async (event) => {
-  event.preventDefault();
-  const editId = $("application-edit-id").value;
-  if (!(await confirmModal(editId ? "Save changes to this application?" : "Create this application?"))) return;
-  await withLoading($("application-submit-btn"), editId ? "Saving…" : "Creating…", async () => {
-    const result = await api(editId ? `/api/v1/applications/${editId}` : "/api/v1/applications", {
-      method: editId ? "PUT" : "POST",
-      body: {
-        name: $("application-name").value,
-        category: getSelectOrOther($("application-category-select"), $("application-category-other")) || null,
-      },
-      auth: true,
-    });
-    if (result.status === 200 || result.status === 201) {
-      toast(editId ? "Application updated." : "Application created.", "ok");
-      $("form-application").classList.add("hidden");
-      resetApplicationForm();
-      reloadPage();
-    }
-  });
-};
 
 /* ---- Suppliers ---- */
 let suppliersCache = [];
@@ -2919,7 +3181,7 @@ async function loadSuppliers() {
   // arbitrary supplier nobody actually chose.
   supplierSelect.innerHTML = items.length
     ? `<option value="">Select a supplier…</option>` +
-      items.map((s) => `<option value="${s.id}">${s.name} &middot; ${s.status} (#${s.id})</option>`).join("")
+      items.map((s) => `<option value="${s.id}">${escText(s.name)} &middot; ${escText(s.status)} (#${s.id})</option>`).join("")
     : `<option value="">No suppliers yet</option>`;
   if (prev && items.some((s) => String(s.id) === prev)) supplierSelect.value = prev;
 }
@@ -2950,9 +3212,9 @@ function renderSuppliersTable(items) {
           .map(
             (s) => `<tr>
           <td>${s.id}</td>
-          <td>${s.name}</td>
-          <td>${fmt(s.category)}</td>
-          <td>${fmt(s.rating)}</td>
+          <td>${escText(s.name)}</td>
+          <td>${fmtHtml(s.category)}</td>
+          <td>${fmtHtml(s.rating)}</td>
           <td><span class="status-pill ${s.status === "suspended" ? "bad" : "good"}">${humanize(s.status)}</span></td>
           <td class="row-actions">
             <div class="row-actions-group">
@@ -3142,8 +3404,8 @@ function renderAssetsTable(items) {
           .map(
             (a) => `<tr>
           <td>${a.id}</td>
-          <td class="text-mono-id">${a.asset_tag}</td>
-          <td>${a.manufacturer} ${a.model}</td>
+          <td class="text-mono-id">${escText(a.asset_tag)}</td>
+          <td>${escText(a.manufacturer)} ${escText(a.model)}</td>
           <td>${a.supplier_id}</td>
           <td><span class="status-pill ${a.status === "disposed" ? "bad" : "good"}">${humanize(a.status)}</span></td>
           <td class="row-actions">
@@ -3399,7 +3661,7 @@ async function loadAssetDetailAttachments() {
         .map(
           (att) => `<div class="attachment-row">
         <span>${icon(att.attachment_type === "photo" ? "view" : "edit")}<strong>${humanize(att.attachment_type)}</strong> &mdash; ${escapeHtml(att.reference)}${att.description ? ` <span style="color:var(--muted)">(${escapeHtml(att.description)})</span>` : ""}</span>
-        <span style="color:var(--muted)">${fmt(att.created_at)}</span>
+        <span style="color:var(--muted)">${fmtHtml(att.created_at)}</span>
       </div>`
         )
         .join("")
@@ -3435,8 +3697,8 @@ async function loadAssetDetailTimeline() {
     ? events
         .map(
           (e) => `<div class="timeline-row">
-        <span class="timeline-when">${fmt(e.created_at)}</span>
-        <span><code>${e.event_type}</code>${e.payload ? ` — ${escapeHtml(JSON.stringify(e.payload))}` : ""}</span>
+        <span class="timeline-when">${fmtHtml(e.created_at)}</span>
+        <span><code>${escText(e.event_type)}</code>${e.payload ? ` — ${escapeHtml(JSON.stringify(e.payload))}` : ""}</span>
       </div>`
         )
         .join("")
@@ -3489,7 +3751,7 @@ function renderManufacturersTable(items) {
           .map(
             (m) => `<tr>
           <td>${m.id}</td>
-          <td>${m.name}</td>
+          <td>${escText(m.name)}</td>
           <td><span class="status-pill ${m.is_active ? "good" : "bad"}">${m.is_active ? "Active" : "Inactive"}</span></td>
           <td>${m.asset_count ?? 0}</td>
           <td class="row-actions">
@@ -3618,7 +3880,7 @@ function renderAssetModelsTable(items) {
           .map(
             (m) => `<tr>
           <td>${m.id}</td>
-          <td>${m.name}</td>
+          <td>${escText(m.name)}</td>
           <td><span class="status-pill ${m.is_active ? "good" : "bad"}">${m.is_active ? "Active" : "Inactive"}</span></td>
           <td>${m.asset_count ?? 0}</td>
           <td class="row-actions">
@@ -3729,8 +3991,23 @@ async function loadAuditLogs() {
     return;
   }
   auditLogsCache = result.data.data.items || [];
-  renderAuditTable(auditLogsCache);
+  renderAuditTable(filterItems(auditLogsCache, $("audit-search").value, AUDIT_SEARCH_FIELDS));
 }
+
+// Live search over the loaded entries, like every other list page. The
+// filter panel below still decides which entries are loaded.
+const AUDIT_SEARCH_FIELDS = ["action", "resource_type", "resource_id", "user_id"];
+$("audit-search").oninput = () => {
+  renderAuditTable(filterItems(auditLogsCache, $("audit-search").value, AUDIT_SEARCH_FIELDS));
+};
+wireSearchSuggestions(
+  "audit-search",
+  "audit-search-suggest",
+  () => auditLogsCache,
+  AUDIT_SEARCH_FIELDS,
+  (row) => `${humanize(row.action)} · ${row.resource_type}${row.resource_id ? ` #${row.resource_id}` : ""}`,
+  (row) => fmt(row.created_at)
+);
 
 function renderAuditTable(items) {
   $("audit-table").innerHTML = table(
@@ -3740,8 +4017,8 @@ function renderAuditTable(items) {
           .map(
             (row) => `<tr>
           <td>${row.id}</td>
-          <td>${fmt(row.created_at)}</td>
-          <td>${fmt(row.user_id)}</td>
+          <td>${fmtHtml(row.created_at)}</td>
+          <td>${fmtHtml(row.user_id)}</td>
           <td>${humanize(row.action)}</td>
           <td>${humanize(row.resource_type)}${row.resource_id ? ` #${row.resource_id}` : ""}</td>
           <td><code>${row.old_value ? escapeHtml(JSON.stringify(row.old_value)) : "—"}</code></td>
@@ -3815,8 +4092,21 @@ async function loadEvents() {
     return;
   }
   eventsCache = result.data.data.items || [];
-  renderEventsTable(eventsCache);
+  renderEventsTable(filterItems(eventsCache, $("events-search").value, EVENT_SEARCH_FIELDS));
 }
+
+const EVENT_SEARCH_FIELDS = ["event_type", "resource_type", "resource_id", "company_id"];
+$("events-search").oninput = () => {
+  renderEventsTable(filterItems(eventsCache, $("events-search").value, EVENT_SEARCH_FIELDS));
+};
+wireSearchSuggestions(
+  "events-search",
+  "events-search-suggest",
+  () => eventsCache,
+  EVENT_SEARCH_FIELDS,
+  (row) => row.event_type,
+  (row) => fmt(row.created_at)
+);
 
 function renderEventsTable(items) {
   $("events-table").innerHTML = table(
@@ -3826,10 +4116,10 @@ function renderEventsTable(items) {
           .map(
             (row) => `<tr>
           <td>${row.id}</td>
-          <td>${fmt(row.created_at)}</td>
-          <td><code>${row.event_type}</code></td>
+          <td>${fmtHtml(row.created_at)}</td>
+          <td><code>${escText(row.event_type)}</code></td>
           <td>${humanize(row.resource_type)}${row.resource_id ? ` #${row.resource_id}` : ""}</td>
-          <td>${fmt(row.company_id)}</td>
+          <td>${fmtHtml(row.company_id)}</td>
           <td><code>${row.payload ? escapeHtml(JSON.stringify(row.payload)) : "—"}</code></td>
         </tr>`
           )
@@ -3918,8 +4208,23 @@ $("form-login").onsubmit = async (event) => {
   });
 };
 
+// Same rule the server enforces (check_password_policy in
+// app/schemas/auth.py) — checked here only to say what's wrong before a
+// round trip. Returns the problem, or "" when the password is acceptable.
+function passwordPolicyError(password) {
+  if (new TextEncoder().encode(password).length > 72) return "The password can be at most 72 bytes long.";
+  if (password.length < 8 || !password.trim()) return "The password must be at least 8 characters.";
+  if (!/\p{L}/u.test(password) || !/\p{Nd}/u.test(password)) return "The password must contain at least one letter and one digit.";
+  return "";
+}
+
 $("form-register").onsubmit = async (event) => {
   event.preventDefault();
+  const policyError = passwordPolicyError($("reg-password").value);
+  if (policyError) {
+    toast(policyError, "bad");
+    return;
+  }
   const button = event.submitter || $("form-register").querySelector("button[type=submit]");
   await withLoading(button, "Creating account…", async () => {
     const result = await api("/api/v1/auth/register", {
@@ -3930,10 +4235,12 @@ $("form-register").onsubmit = async (event) => {
         full_name: $("reg-name").value || null,
       },
     });
-    if (result.status === 201) {
+    // 202 whether or not the address already had an account (the server
+    // deliberately doesn't say which), so the message can't either.
+    if (result.status === 202) {
       $("login-email").value = $("reg-email").value;
       $("login-password").value = $("reg-password").value;
-      toast("Account created. Use Login.", "ok");
+      toast("Registration received. If this email isn't already registered, you can now sign in.", "ok");
       $("tab-login").click();
     }
   });
@@ -4025,6 +4332,9 @@ $("btn-logout-all").onclick = async () => {
     const wanted = currentHashSection();
     if (wanted !== "section-overview") activateSection(wanted, { updateHash: false });
 
+    // Read the saved view first: while loadMe() fills the page, its own
+    // input/change events re-save the defaults (schedulePersistPageState).
+    const pageState = readPageState();
     const ok = await loadMe();
     if (ok) {
     // loadMe() -> loadAdmin() just loaded every list with default filters
@@ -4032,7 +4342,6 @@ $("btn-logout-all").onclick = async () => {
     // company) — re-apply whatever filters/search were actually in use
     // before the reload, so the page doesn't quietly snap back to a
     // default view.
-    const pageState = readPageState();
     if (pageState.usersSearch) {
       $("users-search").value = pageState.usersSearch;
       $("users-search").dispatchEvent(new Event("input"));
@@ -4068,7 +4377,8 @@ $("btn-logout-all").onclick = async () => {
         employeeCompanyFilterCombo.refresh();
       }
       if (pageState.employeeDepartmentFilter) $("employee-department-filter").value = pageState.employeeDepartmentFilter;
-      await loadEmployees();
+      // Read-only users can't list employees — don't ask (it'd only log a 403).
+      if (can("employee", "read")) await loadEmployees();
     } else if (pageState.employeesSearch) {
       $("employees-search").dispatchEvent(new Event("input"));
     }
@@ -4115,15 +4425,6 @@ $("btn-logout-all").onclick = async () => {
       $("job-roles-search").dispatchEvent(new Event("input"));
     }
     // Same reasoning as employeeIncludeExited above.
-    if ("applicationsIncludeInactive" in pageState) {
-      $("applications-include-inactive").checked = !!pageState.applicationsIncludeInactive;
-      await loadApplications();
-    }
-    if (pageState.applicationsSearch) {
-      $("applications-search").value = pageState.applicationsSearch;
-      $("applications-search").dispatchEvent(new Event("input"));
-    }
-    // Same reasoning as employeeIncludeExited above.
     if ("manufacturersIncludeInactive" in pageState) {
       $("manufacturers-include-inactive").checked = !!pageState.manufacturersIncludeInactive;
       await loadManufacturers();
@@ -4140,6 +4441,35 @@ $("btn-logout-all").onclick = async () => {
     if (pageState.assetModelsSearch) {
       $("asset-models-search").value = pageState.assetModelsSearch;
       $("asset-models-search").dispatchEvent(new Event("input"));
+    }
+
+    // Audit and Events (admin only): filters decide what is loaded, the
+    // search box narrows what is shown.
+    if (state.user.role === "admin") {
+      const audit = pageState.auditFilters || {};
+      if (Object.values(audit).some(Boolean)) {
+        $("audit-resource-type").value = audit.resourceType || "";
+        $("audit-action").value = audit.action || "";
+        $("audit-resource-id").value = audit.resourceId || "";
+        $("audit-user-id").value = audit.userId || "";
+        await loadAuditLogs();
+      }
+      if (pageState.auditSearch) {
+        $("audit-search").value = pageState.auditSearch;
+        $("audit-search").dispatchEvent(new Event("input"));
+      }
+      const events = pageState.eventFilters || {};
+      if (Object.values(events).some(Boolean)) {
+        $("event-resource-type").value = events.resourceType || "";
+        $("event-type-filter").value = events.eventType || "";
+        $("event-resource-id").value = events.resourceId || "";
+        $("event-company-id").value = events.companyId || "";
+        await loadEvents();
+      }
+      if (pageState.eventsSearch) {
+        $("events-search").value = pageState.eventsSearch;
+        $("events-search").dispatchEvent(new Event("input"));
+      }
     }
 
     // Now that the role is actually known, re-validate the optimistic

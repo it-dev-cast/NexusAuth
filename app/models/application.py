@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, Table
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, String, Table, Text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -16,11 +16,20 @@ from app.database.database import Base
 # access to X" loaded as ORM objects (application_repository's
 # count_employees_by_application answers the one place that needs a
 # count, via a plain join, not a loaded relationship).
+#
+# granted_at / granted_by_user_id stamp when and by whom a grant was made.
+# They are filled by the access endpoints (app/services/application_access_
+# service.py); a grant made through the employee form still gets granted_at
+# from the column default, with no grantor. Rows from before the columns
+# existed keep NULL for both. Revoking removes the row — the grant/revoke
+# history is the audit log (actions grant_access / revoke_access).
 employee_applications = Table(
     "employee_applications",
     Base.metadata,
     Column("employee_id", ForeignKey("employees.id", ondelete="CASCADE"), primary_key=True),
     Column("application_id", ForeignKey("applications.id", ondelete="CASCADE"), primary_key=True),
+    Column("granted_at", DateTime(timezone=True), server_default=func.now(), nullable=True),
+    Column("granted_by_user_id", ForeignKey("users.id", ondelete="SET NULL"), nullable=True),
 )
 
 
@@ -38,10 +47,22 @@ class Application(Base):
     """
 
     __tablename__ = "applications"
+    __table_args__ = (Index("uq_applications_code", "code", unique=True),)
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
 
     name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+
+    # Short, unique, upper-case identifier (HR_MODULE) — normalised by
+    # ApplicationCreateRequest/UpdateRequest; unique across the master.
+    code: Mapped[str] = mapped_column(String(40), nullable=False)
+
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Optional http(s) address of the application. Informational only: this
+    # master records who is meant to have access, it does not log anyone in to
+    # (or provision accounts in) the application itself.
+    url: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     # Free-text grouping label (e.g. "Core", "People", "Assets",
     # "Operations", "Administration") — purely presentational, groups the

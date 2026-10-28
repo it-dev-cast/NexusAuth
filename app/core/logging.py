@@ -1,11 +1,16 @@
 import json
 import logging
+import re
 import time
 import uuid
 from datetime import datetime, timezone
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
+
+from app.core.audit import mask_value
+from app.core.errors import current_request_id
+from app.core.pagination import current_request_target
 
 
 logger = logging.getLogger("nexusauth.access")
@@ -59,6 +64,9 @@ _BLOCKED = (
 )
 
 
+_VALID_REQUEST_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}")
+
+
 def _safe_path(request: Request) -> str:
     return request.url.path
 
@@ -80,12 +88,42 @@ class SafeAccessLogMiddleware(BaseHTTPMiddleware):
         # so route/error handlers (main.py's exception handlers) can reuse
         # the exact same id as this request's trace_id instead of minting
         # an unrelated second one.
-        request_id = request.headers.get(REQUEST_ID_HEADER) or uuid.uuid4().hex
+        # An inbound id is reused only if it looks like an id: it is echoed
+        # in a response header and written to every log line, so an
+        # arbitrary caller-supplied string (any length, any characters) is
+        # replaced with a fresh one.
+        inbound = request.headers.get(REQUEST_ID_HEADER, "")
+        request_id = inbound if _VALID_REQUEST_ID.fullmatch(inbound) else uuid.uuid4().hex
         request.state.request_id = request_id
+        current_request_id.set(request_id)
+        current_request_target.set((request.url.path, request.url.query))
 
         # Doc: "Performance logging" — request duration, start to finish.
         started = time.perf_counter()
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception:
+            # The unhandled-error handler (main.py) still builds the 500
+            # body; this only makes sure the failing request gets its access
+            # line too, instead of being the one request missing from the log.
+            duration_ms = round((time.perf_counter() - started) * 1000, 2)
+            logger.info(
+                "%s %s -> 500 %sms request_id=%s",
+                request.method,
+                _safe_path(request),
+                duration_ms,
+                request_id,
+                extra={
+                    "context": {
+                        "method": request.method,
+                        "path": _safe_path(request),
+                        "status_code": 500,
+                        "duration_ms": duration_ms,
+                        "request_id": request_id,
+                    }
+                },
+            )
+            raise
         duration_ms = round((time.perf_counter() - started) * 1000, 2)
 
         response.headers[REQUEST_ID_HEADER] = request_id
@@ -130,6 +168,8 @@ class SafeAccessLogMiddleware(BaseHTTPMiddleware):
 
 
 def log_rbac_denied(user_id: int, email: str, role: str, endpoint: str) -> None:
+    # user_id identifies the account; the address itself is PII.
+    email = mask_value(email or "")
     rbac_logger.warning(
         "RBAC_DENIED user_id=%s email=%s role=%s endpoint=%s",
         user_id,

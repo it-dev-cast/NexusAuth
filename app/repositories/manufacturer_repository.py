@@ -2,6 +2,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.manufacturer import Manufacturer
+from app.core.list_query import apply_list_filters, list_order
 
 
 def get_manufacturer_by_id(db: Session, manufacturer_id: int) -> Manufacturer | None:
@@ -24,7 +25,8 @@ def _filtered(query, include_inactive: bool, search: str | None):
         query = query.filter(Manufacturer.is_active == True)  # noqa: E712
     if search:
         query = query.filter(Manufacturer.name.ilike(f"%{search}%"))
-    return query
+    # Extra field[op]=value filters from the request, if any (app/core/list_query.py).
+    return apply_list_filters(query, Manufacturer)
 
 
 def list_manufacturers(
@@ -35,7 +37,7 @@ def list_manufacturers(
     search: str | None = None,
 ) -> list[Manufacturer]:
     query = _filtered(db.query(Manufacturer), include_inactive, search)
-    return query.order_by(Manufacturer.name.asc()).limit(limit).offset(offset).all()
+    return query.order_by(*list_order(Manufacturer, Manufacturer.name.asc())).limit(limit).offset(offset).all()
 
 
 def count_manufacturers(db: Session, include_inactive: bool = False, search: str | None = None) -> int:

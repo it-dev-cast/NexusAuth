@@ -1,5 +1,6 @@
 import hashlib
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request, Response
@@ -11,15 +12,20 @@ from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DataError, IntegrityError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.core.audit import PII_FIELDS, SECRET_FIELDS
 from app.core.config import get_settings
 from app.core.dependencies import get_admin_user, get_current_user
+from app.core.jwt_service import jwks
 from app.core.errors import AuthError, api_error_body, auth_error_handler, new_trace_id
 from app.core.logging import JsonFormatter, SafeAccessLogMiddleware
+from app.core.openapi_docs import enrich_openapi
 from app.core.security_middleware import RateLimitMiddleware, SecurityHeadersMiddleware
+from app.core.transaction import TransactionMiddleware
 from app.database.database import SessionLocal, engine
-from app.database.schema_check import SchemaNotReadyError, verify_schema_ready
+from app.database.schema_check import SchemaNotReadyError, verify_schema_ready, wait_for_database
 from app.models.user import User
 from app.routes.auth import router as auth_router
 from app.routes.company import router as company_router
@@ -34,6 +40,8 @@ from app.routes.application import router as application_router
 from app.routes.manufacturer import router as manufacturer_router
 from app.routes.asset_model import router as asset_model_router
 from app.routes.upload import router as upload_router
+from app.routes.report import router as report_router
+from app.routes.master_data import router as master_data_router
 from app.services.auth_service import bootstrap_admin
 import app.models  # noqa: F401
 import logging
@@ -60,6 +68,7 @@ logging.basicConfig(level=logging.INFO, handlers=[_log_handler])
 # app/database/schema_check.py. If the DB isn't at the expected migration
 # head, fail loudly here rather than quietly improvising a schema or letting
 # every route hit confusing "column does not exist" errors later.
+wait_for_database(engine, attempts=get_settings().db_startup_connect_attempts)
 verify_schema_ready(engine)
 
 _bootstrap_db = SessionLocal()
@@ -69,9 +78,19 @@ finally:
     _bootstrap_db.close()
 
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    yield
+    # Graceful shutdown: close pooled DB connections instead of leaving them
+    # for the server to drop.
+    engine.dispose()
+    logger.info("Shutdown complete: database connections closed")
+
+
 ROOT_PATH = os.getenv("ROOT_PATH", "").rstrip("/")
 
 app = FastAPI(
+    lifespan=lifespan,
     title="Nexus One Authentication Service",
     version="1.0.0",
     description="Intern prototype for Authentication & Token Management.",
@@ -114,6 +133,9 @@ def external_url(path: str) -> str:
 # intended; the small/large decision then simply carries through the
 # other middlewares' pass-through streaming untouched.
 app.add_middleware(GZipMiddleware, minimum_size=1024)
+# Commits (or rolls back) the request's single DB transaction before the
+# response leaves; see app/core/transaction.py.
+app.add_middleware(TransactionMiddleware)
 app.add_middleware(SafeAccessLogMiddleware)
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
@@ -145,8 +167,9 @@ _original_openapi = app.openapi
 
 
 def _branded_openapi() -> dict:
-    schema = _original_openapi()
-
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema = enrich_openapi(_original_openapi(), app)
     schema["info"]["x-logo"] = {
         "url": CASTERLY_LOGO_URL,
         "backgroundColor": "#1A0A37",
@@ -206,6 +229,19 @@ def custom_redoc_html() -> HTMLResponse:
     )
 
 
+def _without_sensitive_input(errors: list[dict]) -> list[dict]:
+    """Validation details normally echo the rejected value back. Not for PII
+    or credentials: a mistyped Aadhaar or password must not come back in the
+    response body (or end up in a client's error log)."""
+    cleaned = []
+    for error in errors:
+        field = next((part for part in reversed(error.get("loc", ())) if isinstance(part, str)), None)
+        if field in PII_FIELDS or field in SECRET_FIELDS:
+            error = {key: value for key, value in error.items() if key not in ("input", "ctx")}
+        cleaned.append(error)
+    return cleaned
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     # Module 9 (API Standards) §"Error Handling": every error response
@@ -235,9 +271,42 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
         content=api_error_body(
             "VALIDATION_ERROR",
             "Request validation failed.",
-            details=jsonable_encoder(exc.errors()),
+            details=jsonable_encoder(_without_sensitive_input(exc.errors())),
             trace_id=trace_id,
         ),
+    )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_error_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    """Framework-raised errors (unknown route, wrong method, ...) in the same
+    envelope as every other error, instead of Starlette's bare {"detail"}."""
+    trace_id = getattr(request.state, "request_id", None) or new_trace_id()
+    codes = {404: "NOT_FOUND", 405: "METHOD_NOT_ALLOWED"}
+    message = exc.detail if isinstance(exc.detail, str) else "Request failed."
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=api_error_body(codes.get(exc.status_code, f"HTTP_{exc.status_code}"), message, trace_id=trace_id),
+        headers=getattr(exc, "headers", None),
+    )
+
+
+@app.exception_handler(DataError)
+async def data_error_handler(request: Request, exc: DataError) -> JSONResponse:
+    """A value the database can't store or compare (an id beyond the integer
+    range, a number too large for its column, a NUL byte) is bad input, not a
+    server fault."""
+    trace_id = getattr(request.state, "request_id", None) or new_trace_id()
+    logger.info(
+        "Data error on %s %s: %s",
+        request.method,
+        request.url.path,
+        exc.orig.__class__.__name__ if exc.orig else exc.__class__.__name__,
+        extra={"context": {"event": "data_error", "method": request.method, "path": request.url.path, "trace_id": trace_id}},
+    )
+    return JSONResponse(
+        status_code=422,
+        content=api_error_body("VALIDATION_ERROR", "A value in the request is out of range or not storable.", trace_id=trace_id),
     )
 
 
@@ -364,8 +433,17 @@ def readiness(response: Response):
     return {"status": "ready", "checks": checks}
 
 
+@app.get("/.well-known/jwks.json", include_in_schema=False)
+def jwks_endpoint():
+    """The public keys that verify this service's tokens (RS256), so other
+    Nexus One modules can check a token without holding any signing secret.
+    Public by design — it only ever carries public keys — and empty under
+    HS256, where verifying needs the shared secret."""
+    return JSONResponse(jwks(), headers={"Cache-Control": "public, max-age=300"})
+
+
 @app.get("/db-test")
-def database_test():
+def database_test(_admin: User = Depends(get_admin_user)):
     with engine.connect() as connection:
         result = connection.execute(text("SELECT 1"))
         value = result.scalar()
@@ -389,6 +467,8 @@ app.include_router(application_router)
 app.include_router(manufacturer_router)
 app.include_router(asset_model_router)
 app.include_router(upload_router)
+app.include_router(report_router)
+app.include_router(master_data_router)
 
 
 @app.get("/protected")

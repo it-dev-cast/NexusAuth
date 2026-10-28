@@ -26,6 +26,10 @@ class Supplier(Base):
     # Free-form grouping, e.g. "Hardware", "Logistics".
     category: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
+    # Added by migration d9f3a7c5b182 (master-backed fields); mapped here so
+    # autogenerate doesn't read it as a dropped column. Not exposed by the API yet.
+    supplier_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
     # Supplier lifecycle: onboarded -> approved -> suspended (and back).
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="onboarded")
 

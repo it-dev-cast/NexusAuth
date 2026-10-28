@@ -1,6 +1,6 @@
 from app.database.database import SessionLocal
 from app.models.user import User
-from app.tests.conftest import PASSWORD, client, register_and_login, unique_email
+from app.tests.conftest import PASSWORD, client, register_and_login, unique_code, unique_email
 
 
 def _headers_with_role(role: str):
@@ -26,7 +26,7 @@ def _unique_name():
 
 def test_create_application_success():
     headers = _admin_headers()
-    response = client.post("/api/v1/applications", json={"name": _unique_name()}, headers=headers)
+    response = client.post("/api/v1/applications", json={"name": _unique_name(), "code": unique_code()}, headers=headers)
     assert response.status_code == 201
     data = response.json()["data"]
     assert data["is_active"] is True
@@ -36,8 +36,8 @@ def test_create_application_success():
 def test_duplicate_application_name_rejected():
     headers = _admin_headers()
     name = _unique_name()
-    client.post("/api/v1/applications", json={"name": name}, headers=headers)
-    response = client.post("/api/v1/applications", json={"name": name}, headers=headers)
+    client.post("/api/v1/applications", json={"name": name, "code": unique_code()}, headers=headers)
+    response = client.post("/api/v1/applications", json={"name": name, "code": unique_code()}, headers=headers)
     assert response.status_code == 400
 
 
@@ -47,13 +47,13 @@ def test_operator_can_read_but_not_write_application():
     listed = client.get("/api/v1/applications", headers=operator_headers)
     assert listed.status_code == 200
 
-    created = client.post("/api/v1/applications", json={"name": _unique_name()}, headers=operator_headers)
+    created = client.post("/api/v1/applications", json={"name": _unique_name(), "code": unique_code()}, headers=operator_headers)
     assert created.status_code == 403
 
 
 def test_update_application_name():
     headers = _admin_headers()
-    created = client.post("/api/v1/applications", json={"name": _unique_name()}, headers=headers)
+    created = client.post("/api/v1/applications", json={"name": _unique_name(), "code": unique_code()}, headers=headers)
     application_id = created.json()["data"]["id"]
 
     new_name = _unique_name()
@@ -66,7 +66,7 @@ def test_update_application_name():
 
 def test_deactivate_and_reactivate_application():
     headers = _admin_headers()
-    created = client.post("/api/v1/applications", json={"name": _unique_name()}, headers=headers)
+    created = client.post("/api/v1/applications", json={"name": _unique_name(), "code": unique_code()}, headers=headers)
     application_id = created.json()["data"]["id"]
 
     deactivated = client.delete(f"/api/v1/applications/{application_id}", headers=headers)

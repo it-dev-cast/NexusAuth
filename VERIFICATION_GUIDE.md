@@ -92,7 +92,7 @@ Use Swagger UI (`http://127.0.0.1:8000/docs`) or curl/PowerShell. Login as
 |---|---|---|
 | 1 | `POST /auth/login` as admin | 200, tokens returned |
 | 2 | `GET /auth/overview` as admin | 200, full user list |
-| 3 | `POST /auth/register` a new user | 201, `role: "read_only"` |
+| 3 | `POST /auth/register` a new user | 202 `{"message": ...}` — the same answer for an email that is already registered, so it never reveals which addresses have accounts; sign in to get the account (`role: "read_only"`) |
 | 4 | That new user hits `GET /auth/overview` | **403** |
 | 5 | `POST /companies` as admin | 201 |
 | 6 | `read_only` user does `GET /companies/{id}` | **200** (company reads are open) |

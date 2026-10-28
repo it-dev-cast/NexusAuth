@@ -1,4 +1,5 @@
 import uuid
+from contextvars import ContextVar
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -22,10 +23,16 @@ def new_trace_id() -> str:
     return str(uuid.uuid4())
 
 
+# The current request's id (set by SafeAccessLogMiddleware), so a success
+# body's meta.trace_id matches the X-Request-Id header and the access log,
+# the same way error bodies already do.
+current_request_id: ContextVar[str | None] = ContextVar("current_request_id", default=None)
+
+
 def api_ok(data, trace_id: str | None = None) -> dict:
     return {
         "data": data,
-        "meta": {"trace_id": trace_id or new_trace_id()},
+        "meta": {"trace_id": trace_id or current_request_id.get() or new_trace_id()},
     }
 
 

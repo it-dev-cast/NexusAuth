@@ -59,6 +59,12 @@ import tempfile  # noqa: E402
 
 os.environ["UPLOAD_DIR"] = tempfile.mkdtemp(prefix="nexusauth_test_uploads_")
 
+# Every test shares one TestClient, i.e. one caller address, so the login /
+# register rate limit would trip on ordinary test traffic. It is switched off
+# here the way any deployment could (the setting is refused in production);
+# the tests of the limiter itself turn it back on for their own duration.
+os.environ["RATE_LIMIT_ENABLED"] = "false"
+
 from fastapi.testclient import TestClient
 
 from main import app
@@ -70,6 +76,12 @@ PASSWORD = "TestPassword123"
 
 def unique_email() -> str:
     return f"intern_{uuid.uuid4().hex[:12]}@casterly.com"
+
+
+def unique_code(prefix: str = "APP") -> str:
+    """A per-call unique, already-normalised application code (upper-case,
+    letters/digits/underscore)."""
+    return f"{prefix}_{uuid.uuid4().hex[:10].upper()}"
 
 
 def unique_word() -> str:
@@ -91,7 +103,7 @@ def register_and_login(email: str | None = None):
         "/api/v1/auth/register",
         json={"email": email, "password": PASSWORD, "full_name": "Intern Demo"},
     )
-    assert register.status_code == 201
+    assert register.status_code == 202
     login = client.post(
         "/api/v1/auth/login",
         json={"email": email, "password": PASSWORD},

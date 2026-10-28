@@ -75,6 +75,15 @@ PERMISSIONS: dict[str, dict[str, set[str]]] = {
         "write": set(),
         "delete": set(),
     },
+    "application_access": {
+        # Who holds which application — grant, revoke, and the per-application
+        # employee list. Admin only (the empty sets; allowed_roles adds
+        # Role.ADMIN): it changes what employees across every company are
+        # meant to use, and lists their records, which the read-only
+        # application master above does not.
+        "read": set(),
+        "write": set(),
+    },
     "manufacturer": {
         # Master/reference data for the Asset form's Manufacturer
         # dropdown — same reasoning as job_role/department/application
@@ -86,6 +95,15 @@ PERMISSIONS: dict[str, dict[str, set[str]]] = {
     "asset_model": {
         # Master/reference data for the Asset form's Model dropdown —
         # same reasoning as job_role/department/application above.
+        "read": {Role.OPERATOR, Role.READ_ONLY},
+        "write": set(),
+        "delete": set(),
+    },
+    "master_data": {
+        # The list masters behind the Master Management page (Supplier
+        # Category, Payment Terms, Application Category — app/core/master_data.py).
+        # Same reasoning as job_role/manufacturer above: every role needs read
+        # access to fill the form dropdowns, only admin edits the shared lists.
         "read": {Role.OPERATOR, Role.READ_ONLY},
         "write": set(),
         "delete": set(),
@@ -121,3 +139,20 @@ def allowed_roles(resource: str, action: str) -> set[str]:
             "Add one to app/core/permissions.py — don't hardcode roles in a route."
         ) from exc
     return roles | {Role.ADMIN}
+
+
+def permissions_for_role(role: str) -> dict[str, list[str]]:
+    """Every resource -> the actions `role` may perform on it, built from
+    allowed_roles() so it can never disagree with what the routes enforce.
+
+    Returned on /auth/me so the frontend can decide which pages and buttons
+    to show without keeping its own second copy of this matrix — the server
+    still refuses anything the UI gets wrong, this only keeps the UI from
+    offering it.
+    """
+    result: dict[str, list[str]] = {}
+    for resource, actions in PERMISSIONS.items():
+        granted = sorted(a for a in actions if role in allowed_roles(resource, a))
+        if granted:
+            result[resource] = granted
+    return result

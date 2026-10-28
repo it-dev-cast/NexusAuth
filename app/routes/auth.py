@@ -21,6 +21,7 @@ from app.services.auth_service import (
     logout_all_sessions,
     logout_user,
     refresh_tokens,
+    REGISTRATION_MESSAGE,
     register_user,
     revoke_user_session,
     unlock_user_account,
@@ -34,13 +35,16 @@ router = APIRouter(
 )
 
 
-@router.post("/register", status_code=201)
+@router.post("/register", status_code=202)
 def register(
     data: RegisterRequest,
     db: Session = Depends(get_db),
 ):
-    user = register_user(db, data)
-    return api_ok(UserResponse.model_validate(user).model_dump())
+    # 202 and the same body whether or not the address already had an account
+    # (see register_user): nothing here says which, and nothing about the
+    # account (id, role) is returned — sign in to get those.
+    register_user(db, data)
+    return api_ok({"message": REGISTRATION_MESSAGE})
 
 
 @router.post("/login")

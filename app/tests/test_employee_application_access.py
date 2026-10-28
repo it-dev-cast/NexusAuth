@@ -1,6 +1,6 @@
 from app.database.database import SessionLocal
 from app.models.user import User
-from app.tests.conftest import PASSWORD, client, register_and_login, unique_email, unique_word
+from app.tests.conftest import PASSWORD, client, register_and_login, unique_code, unique_email, unique_word
 
 
 def _headers_with_role(role: str, company_id: int | None = None):
@@ -36,7 +36,7 @@ def _create_company(headers):
 
 def _create_application(headers, name=None):
     created = client.post(
-        "/api/v1/applications", json={"name": name or f"App {unique_email()}"}, headers=headers
+        "/api/v1/applications", json={"name": name or f"App {unique_email()}", "code": unique_code()}, headers=headers
     )
     return created.json()["data"]["id"]
 

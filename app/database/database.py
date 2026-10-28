@@ -1,5 +1,6 @@
 from sqlalchemy import create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+from starlette.requests import Request
 
 from app.core.config import get_settings
 
@@ -30,22 +31,54 @@ engine = create_engine(
 
 Base = declarative_base()
 
+class AppSession(Session):
+    """Inside an API request, commit() only flushes: the request is one
+    transaction, committed once by TransactionMiddleware after the route has
+    finished (and so after its audit row is written). A failure anywhere
+    rolls back the business change and its audit trail together, instead of
+    leaving a committed change with no audit row.
+
+    Outside a request (scripts, startup, tests using SessionLocal directly)
+    commit() behaves normally."""
+
+    def commit(self) -> None:
+        if self.info.get("defer_commit"):
+            self.flush()
+            return
+        super().commit()
+
+    def commit_now(self) -> None:
+        """Commit even inside a request. Only for writes that must survive
+        the error the request is about to return: failed-login counters,
+        access-denied audit rows, token-reuse revocations."""
+        super().commit()
+
+
+def commit_now(db: Session) -> None:
+    """AppSession.commit_now() where available; a plain commit otherwise."""
+    getattr(db, "commit_now", db.commit)()
+
+
 SessionLocal = sessionmaker(
+    class_=AppSession,
     autocommit=False,
     autoflush=False,
     bind=engine,
 )
 
 
-def get_db():
+def get_db(request: Request):
     db = SessionLocal()
+    db.info["defer_commit"] = True
+    # TransactionMiddleware (app/core/transaction.py) commits or rolls back
+    # this session before the response is sent; this generator's exit code
+    # only runs after the response has gone out.
+    request.state.db_session = db
     try:
         yield db
     except Exception:
         # Belt-and-suspenders: make sure a failed request never leaves a
-        # transaction half-applied. Session.close() alone would discard the
-        # connection anyway, but rolling back explicitly here documents the
-        # intent and guarantees it even if that default ever changes.
+        # transaction half-applied.
         db.rollback()
         raise
     finally:

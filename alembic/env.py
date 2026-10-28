@@ -3,7 +3,7 @@ import sys
 from logging.config import fileConfig
 
 from dotenv import load_dotenv
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, pool, text
 from alembic import context
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -22,6 +22,17 @@ if config.config_file_name:
 
 # 3. Set target_metadata for autogenerate support
 target_metadata = Base.metadata
+
+# Arbitrary fixed key for pg_advisory_xact_lock, shared by every migration run.
+MIGRATION_LOCK_KEY = 7364821990
+
+
+def _lock_timeout() -> str:
+    """MIGRATION_LOCK_TIMEOUT, e.g. "10s" or "2min" (default 10s)."""
+    value = os.environ.get("MIGRATION_LOCK_TIMEOUT", "10s").strip()
+    if not value or not all(c.isalnum() for c in value):
+        raise ValueError("MIGRATION_LOCK_TIMEOUT must look like 10s, 500ms or 2min.")
+    return value
 
 
 def run_migrations_offline() -> None:
@@ -60,6 +71,13 @@ def run_migrations_online() -> None:
         )
 
         with context.begin_transaction():
+            # One migration run at a time: a second `alembic upgrade` (e.g. two
+            # deploys starting together) waits here, then finds the database
+            # already at head. The lock is released when this transaction ends.
+            connection.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": MIGRATION_LOCK_KEY})
+            # Don't queue behind long-running queries holding table locks for
+            # ever (and block everything queued behind us meanwhile).
+            connection.execute(text(f"SET LOCAL lock_timeout = '{_lock_timeout()}'"))
             context.run_migrations()
 
 

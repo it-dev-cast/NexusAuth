@@ -9,7 +9,17 @@ from app.models.user import User
 
 
 def get_user_by_email(db: Session, email: str) -> User | None:
-    return db.query(User).filter(User.email == email).first()
+    # Email addresses are matched case-insensitively: "Ravi@x.com" and
+    # "ravi@x.com" are the same mailbox, so they must be the same account for
+    # both the register duplicate check and login. New accounts are stored
+    # lowercased (RegisterRequest); lower() here also finds older rows saved
+    # with capitals. If case-only duplicates already exist, the oldest wins.
+    return (
+        db.query(User)
+        .filter(func.lower(User.email) == email.strip().lower())
+        .order_by(User.id)
+        .first()
+    )
 
 
 def get_user_by_id(db: Session, user_id: int) -> User | None:

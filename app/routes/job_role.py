@@ -5,6 +5,8 @@ from app.core.dependencies import require_roles
 from app.core.errors import api_ok
 from app.core.permissions import allowed_roles
 from app.database.database import get_db
+from app.core.list_query import LIST_QUERY_HELP, list_query
+from app.models.job_role import JobRole
 from app.models.user import User
 from app.schemas.job_role import JobRoleCreateRequest, JobRoleResponse, JobRoleUpdateRequest
 from app.services.job_role_service import (
@@ -28,7 +30,7 @@ require_writer = require_roles(*allowed_roles("job_role", "write"))
 require_deleter = require_roles(*allowed_roles("job_role", "delete"))
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(list_query(JobRole))], description=LIST_QUERY_HELP)
 def list_job_roles_endpoint(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),

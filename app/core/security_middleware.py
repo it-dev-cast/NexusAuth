@@ -1,12 +1,12 @@
-import os
-import time
-from collections import defaultdict, deque
-
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from app.core.client_ip import client_ip, rate_limit_identity
+from app.core.config import get_settings
 from app.core.errors import api_error_body, new_trace_id
+from app.core.rate_limit import get_limiter
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -32,6 +32,18 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "same-origin")
+        # The API version that served this response, matching the URL prefix.
+        if request.url.path.startswith("/api/v1/"):
+            response.headers.setdefault("X-API-Version", "v1")
+        # Token-bearing responses must never be cached by a browser or proxy.
+        if request.url.path.startswith("/api/v1/auth/"):
+            response.headers.setdefault("Cache-Control", "no-store")
+            response.headers.setdefault("Pragma", "no-cache")
+        # Opt-in (HSTS_MAX_AGE_SECONDS): only meaningful once HTTPS is
+        # terminated in front of this app; harmless to browsers over HTTP.
+        hsts = get_settings().hsts_max_age_seconds
+        if hsts > 0:
+            response.headers.setdefault("Strict-Transport-Security", f"max-age={hsts}; includeSubDomains")
         # Swagger UI/ReDoc (main.py's /docs, /redoc) load their own
         # third-party assets and are excluded via the path check below
         # rather than loosening this policy for every route.
@@ -47,60 +59,50 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 
 # Doc: "Rate limiting" / "Rate limit enforcement per endpoint" (Module 10:
-# Security). Deliberately scoped to the unauthenticated auth endpoints
-# (login/register) rather than every route: those are the ones a caller
-# can hit repeatedly with no credential at all, and this codebase already
-# has a broad, well-exercised test suite that hits every other endpoint
-# rapidly in succession — a global limiter would risk tripping on the test
-# suite itself, not just real abuse. In-process/in-memory by design (no
-# Redis or other shared store exists in this codebase); resets on restart
-# and doesn't share state across multiple app processes — acceptable for
-# this single-instance deployment, not a distributed rate limiter.
-RATE_LIMITED_PATHS = {
-    "/api/v1/auth/login": (10, 60),  # 10 requests / 60s per IP
-    "/api/v1/auth/register": (5, 60),
-}
+# Security). Scoped to the unauthenticated auth endpoints (login/register):
+# those are the ones a caller can hit repeatedly with no credential at all.
+#
+# Counters live in PostgreSQL by default (app/core/rate_limit.py), so the
+# limit is shared by every worker process and container; RATE_LIMIT_BACKEND=
+# memory keeps them per process for a single dev server. The caller is the
+# real client address: behind a reverse proxy set TRUSTED_PROXIES so
+# X-Forwarded-For is believed from it (and only from it) — see
+# app/core/client_ip.py. The limit is never skipped for tests: the suite
+# turns it off through RATE_LIMIT_ENABLED like any deployment could, and the
+# tests of the limiter itself turn it back on.
+RATE_LIMIT_WINDOW_SECONDS = 60
+
+
+def rate_limited_paths(settings) -> dict[str, int]:
+    """Endpoint -> requests allowed per window, per caller."""
+    return {
+        "/api/v1/auth/login": settings.rate_limit_login_per_minute,
+        "/api/v1/auth/register": settings.rate_limit_register_per_minute,
+    }
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app):
-        super().__init__(app)
-        self._hits: dict[tuple[str, str], deque] = defaultdict(deque)
-
     async def dispatch(self, request: Request, call_next):
-        # The test suite shares one TestClient (app/tests/conftest.py),
-        # meaning every test looks like the same IP hitting the same path —
-        # exempting it isn't weakening real rate limiting, it's avoiding a
-        # false trip from the test harness itself (pytest sets
-        # PYTEST_CURRENT_TEST for the duration of every test, a standard,
-        # well-known way to detect this without any test-file changes).
-        if "PYTEST_CURRENT_TEST" in os.environ:
+        settings = get_settings()
+        if not settings.rate_limit_enabled or request.method != "POST":
             return await call_next(request)
 
-        limit = RATE_LIMITED_PATHS.get(request.url.path)
-        if limit is None:
+        max_requests = rate_limited_paths(settings).get(request.url.path)
+        if max_requests is None:
             return await call_next(request)
 
-        max_requests, window_seconds = limit
-        ip = request.client.host if request.client else "unknown"
-        key = (ip, request.url.path)
-        now = time.monotonic()
-        hits = self._hits[key]
+        key = f"{request.url.path}|{rate_limit_identity(client_ip(request))}"
+        limiter = get_limiter()
+        hits, retry_after = await run_in_threadpool(limiter.hit, key, RATE_LIMIT_WINDOW_SECONDS)
 
-        while hits and now - hits[0] > window_seconds:
-            hits.popleft()
-
-        if len(hits) >= max_requests:
-            trace_id = new_trace_id()
+        if hits > max_requests:
             return JSONResponse(
                 status_code=429,
                 content=api_error_body(
                     "RATE_LIMITED",
                     "Too many requests. Please try again shortly.",
-                    trace_id=trace_id,
+                    trace_id=new_trace_id(),
                 ),
-                headers={"Retry-After": str(window_seconds)},
+                headers={"Retry-After": str(retry_after)},
             )
-
-        hits.append(now)
         return await call_next(request)

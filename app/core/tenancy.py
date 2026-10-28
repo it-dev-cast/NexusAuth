@@ -54,20 +54,27 @@ def enforce_company_scope(
     if current_user.company_id == resource_company_id:
         return
 
+    from app.database.database import commit_now
     from app.services.audit_service import record_audit_event
 
+    # The request is about to fail: drop anything it wrote so far, then keep
+    # only the denial record (committed now, since the failing request's
+    # transaction is rolled back).
+    actor_id, actor_role = current_user.id, current_user.role
+    db.rollback()
     record_audit_event(
         db,
-        current_user.id,
+        actor_id,
         "access_denied",
         "rbac",
-        resource_id=current_user.id,
+        resource_id=actor_id,
         old_value=None,
         new_value={
             "reason": "cross_company",
             "resource_type": resource_type,
             "resource_id": str(resource_id) if resource_id is not None else None,
-            "role": current_user.role,
+            "role": actor_role,
         },
     )
+    commit_now(db)
     raise not_found_error

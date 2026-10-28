@@ -2,6 +2,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.supplier import Supplier
+from app.core.list_query import apply_list_filters, list_order
 
 
 def get_supplier_by_id(db: Session, supplier_id: int) -> Supplier | None:
@@ -27,7 +28,8 @@ def _filtered(query, status: str | None, category: str | None, search: str | Non
     if search:
         # Partial, case-insensitive match on name (Module 9: Filtering & Sorting).
         query = query.filter(Supplier.name.ilike(f"%{search}%"))
-    return query
+    # Extra field[op]=value filters from the request, if any (app/core/list_query.py).
+    return apply_list_filters(query, Supplier)
 
 
 def list_suppliers(
@@ -45,7 +47,7 @@ def list_suppliers(
     # Newest first by default — see the matching comment in
     # company_repository.py. Still fully overridable via sort_dir.
     order = column.asc() if sort_dir == "asc" else column.desc()
-    return query.order_by(order).limit(limit).offset(offset).all()
+    return query.order_by(*list_order(Supplier, order)).limit(limit).offset(offset).all()
 
 
 def count_suppliers(

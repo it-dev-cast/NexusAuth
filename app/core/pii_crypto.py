@@ -17,7 +17,7 @@ retroactively re-encrypted by this change; only new writes are).
 """
 import logging
 
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
 from app.core.config import get_settings
 
@@ -26,7 +26,10 @@ logger = logging.getLogger("nexusauth.pii")
 _warned_missing_key = False
 
 
-def get_fernet() -> Fernet | None:
+def get_fernet() -> MultiFernet | None:
+    """Encrypts with PII_ENCRYPTION_KEY; decrypts with it or any key in
+    PII_PREVIOUS_ENCRYPTION_KEYS, so the key can be rotated without making
+    existing values unreadable."""
     settings = get_settings()
     key = settings.pii_encryption_key
     if not key:
@@ -41,7 +44,7 @@ def get_fernet() -> Fernet | None:
             )
             _warned_missing_key = True
         return None
-    return Fernet(key.encode("utf-8"))
+    return MultiFernet([Fernet(k.encode("utf-8")) for k in settings.pii_decryption_keys])
 
 
 def encrypt_value(value: str) -> str:

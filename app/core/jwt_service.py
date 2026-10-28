@@ -12,6 +12,19 @@ def _settings():
     return get_settings()
 
 
+def _encode(payload: dict) -> str:
+    """Sign with the configured algorithm: the shared secret under HS256, the
+    RSA private key (plus a `kid` header naming the matching public key, so a
+    verifier can pick the right one after a rotation) under RS256."""
+    settings = _settings()
+    return jwt.encode(
+        payload,
+        settings.jwt_signing_key,
+        algorithm=settings.jwt_algorithm,
+        headers=settings.jwt_signing_headers,
+    )
+
+
 def create_access_token(
     user_id: int,
     role: str | None = None,
@@ -37,12 +50,7 @@ def create_access_token(
         "token_type": "access",
     }
 
-    token = jwt.encode(
-        payload,
-        settings.jwt_secret_key,
-        algorithm=settings.jwt_algorithm,
-    )
-    return token, jti
+    return _encode(payload), jti
 
 
 def create_refresh_token(
@@ -65,25 +73,43 @@ def create_refresh_token(
         "token_type": "refresh",
     }
 
-    return jwt.encode(
-        payload,
-        settings.jwt_secret_key,
-        algorithm=settings.jwt_algorithm,
-    )
+    return _encode(payload)
+
+
+def _unverified_header_field(token: str, name: str):
+    try:
+        return jwt.get_unverified_header(token).get(name)
+    except JWTError:
+        return None
 
 
 def decode_token(token: str) -> dict:
+    """Verify with the current key, then any keys being rotated out
+    (JWT_PREVIOUS_SECRET_KEYS / JWT_PREVIOUS_PUBLIC_KEY_PATHS). Every key is
+    tried only with its own algorithm — never the token's own `alg` header, so
+    a token can't pick how it is verified — and every token must carry an
+    expiry: one without `exp` would never expire."""
     settings = _settings()
-    try:
-        return jwt.decode(
-            token,
-            settings.jwt_secret_key,
-            algorithms=[settings.jwt_algorithm],
-        )
-    except ExpiredSignatureError as exc:
-        raise ValueError("expired") from exc
-    except JWTError as exc:
-        raise ValueError("invalid") from exc
+    verifiers = settings.jwt_verifiers
+    # A `kid` naming one of our public keys goes first; it's only a hint, the
+    # signature still has to verify.
+    kid = _unverified_header_field(token, "kid")
+    if kid:
+        verifiers = sorted(verifiers, key=lambda v: v[0] != kid)
+    for _kid, key, algorithm in verifiers:
+        try:
+            return jwt.decode(
+                token,
+                key,
+                algorithms=[algorithm],
+                options={"require_exp": True},
+            )
+        except ExpiredSignatureError as exc:
+            # The signature matched this key; the token is just old.
+            raise ValueError("expired") from exc
+        except JWTError:
+            continue
+    raise ValueError("invalid")
 
 
 def decode_typed_token(token: str, expected_type: str) -> dict:
@@ -100,3 +126,17 @@ def decode_typed_token(token: str, expected_type: str) -> dict:
 
 def hash_refresh_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def jwks() -> dict:
+    """The public keys tokens can be verified with, as a JSON Web Key Set
+    (served at /.well-known/jwks.json). Only public halves are ever included;
+    empty under HS256, where verifying needs the shared secret."""
+    from jose import jwk
+
+    keys = []
+    for kid, pem in _settings().jwt_public_keys:
+        entry = jwk.construct(pem, "RS256").to_dict()
+        entry.update({"kid": kid, "use": "sig", "alg": "RS256"})
+        keys.append(entry)
+    return {"keys": keys}

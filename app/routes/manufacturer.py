@@ -5,6 +5,8 @@ from app.core.dependencies import require_roles
 from app.core.errors import api_ok
 from app.core.permissions import allowed_roles
 from app.database.database import get_db
+from app.core.list_query import LIST_QUERY_HELP, list_query
+from app.models.manufacturer import Manufacturer
 from app.models.user import User
 from app.schemas.manufacturer import (
     ManufacturerCreateRequest,
@@ -32,7 +34,7 @@ require_writer = require_roles(*allowed_roles("manufacturer", "write"))
 require_deleter = require_roles(*allowed_roles("manufacturer", "delete"))
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(list_query(Manufacturer))], description=LIST_QUERY_HELP)
 def list_manufacturers_endpoint(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),

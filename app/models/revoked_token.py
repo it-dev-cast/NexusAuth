@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String
+from sqlalchemy import DateTime, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.database import Base
@@ -8,6 +8,9 @@ from app.database.database import Base
 
 class RevokedToken(Base):
     __tablename__ = "revoked_tokens"
+    # Migration d2e8f6c1a044 created both a unique constraint and a unique
+    # index on jti; declare both so autogenerate sees no difference.
+    __table_args__ = (UniqueConstraint("jti", name="revoked_tokens_jti_key"),)
 
     id: Mapped[int] = mapped_column(
         Integer,

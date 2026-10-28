@@ -2,6 +2,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.asset_model import AssetModel
+from app.core.list_query import apply_list_filters, list_order
 
 
 def get_asset_model_by_id(db: Session, asset_model_id: int) -> AssetModel | None:
@@ -24,7 +25,8 @@ def _filtered(query, include_inactive: bool, search: str | None):
         query = query.filter(AssetModel.is_active == True)  # noqa: E712
     if search:
         query = query.filter(AssetModel.name.ilike(f"%{search}%"))
-    return query
+    # Extra field[op]=value filters from the request, if any (app/core/list_query.py).
+    return apply_list_filters(query, AssetModel)
 
 
 def list_asset_models(
@@ -35,7 +37,7 @@ def list_asset_models(
     search: str | None = None,
 ) -> list[AssetModel]:
     query = _filtered(db.query(AssetModel), include_inactive, search)
-    return query.order_by(AssetModel.name.asc()).limit(limit).offset(offset).all()
+    return query.order_by(*list_order(AssetModel, AssetModel.name.asc())).limit(limit).offset(offset).all()
 
 
 def count_asset_models(db: Session, include_inactive: bool = False, search: str | None = None) -> int:

@@ -8,6 +8,8 @@ from app.core.errors import api_ok
 from app.core.permissions import allowed_roles
 from app.core.supplier_status import SupplierStatus
 from app.database.database import get_db
+from app.core.list_query import LIST_QUERY_HELP, list_query
+from app.models.supplier import Supplier
 from app.models.user import User
 from app.schemas.supplier import (
     SupplierCreateRequest,
@@ -36,7 +38,7 @@ require_reader = require_roles(*allowed_roles("supplier", "read"))
 require_writer = require_roles(*allowed_roles("supplier", "write"))
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(list_query(Supplier))], description=LIST_QUERY_HELP)
 def list_suppliers_endpoint(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),

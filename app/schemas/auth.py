@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 # bcrypt silently truncates the input to its first 72 BYTES — anything
 # after that is ignored by hashpw/checkpw entirely. Without a cap, two
@@ -8,27 +8,51 @@ from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
 # then verify) identically, which is surprising and a real weakening of
 # the password. Reject before it ever reaches bcrypt instead.
 MAX_PASSWORD_BYTES = 72
+MIN_PASSWORD_LENGTH = 8
+
+
+def check_password_policy(value: str, field: str = "password") -> str:
+    """The rule every new password must meet (register, change-password):
+    8+ characters, at least one letter and one digit, and at most 72 bytes.
+    Login deliberately doesn't apply it, so accounts created before the rule
+    can still sign in and then change their password."""
+    if len(value.encode("utf-8")) > MAX_PASSWORD_BYTES:
+        raise ValueError(
+            f"{field} must be at most {MAX_PASSWORD_BYTES} bytes "
+            "(bcrypt silently truncates anything longer)."
+        )
+    if len(value) < MIN_PASSWORD_LENGTH or not value.strip():
+        raise ValueError(f"{field} must be at least {MIN_PASSWORD_LENGTH} characters.")
+    if not any(c.isalpha() for c in value) or not any(c.isdigit() for c in value):
+        raise ValueError(f"{field} must contain at least one letter and one digit.")
+    return value
 
 
 class RegisterRequest(BaseModel):
     email: EmailStr
     password: str
-    full_name: str | None = None
+    full_name: str | None = Field(default=None, max_length=255)
+
+    @field_validator("email")
+    @classmethod
+    def email_is_lowercase(cls, value: str) -> str:
+        # One account per mailbox, whatever capitals it was typed with —
+        # see get_user_by_email.
+        return value.lower()
 
     @field_validator("password")
     @classmethod
-    def password_must_fit_bcrypt(cls, value: str) -> str:
-        if len(value.encode("utf-8")) > MAX_PASSWORD_BYTES:
-            raise ValueError(
-                f"password must be at most {MAX_PASSWORD_BYTES} bytes "
-                "(bcrypt silently truncates anything longer)."
-            )
-        return value
+    def password_meets_policy(cls, value: str) -> str:
+        return check_password_policy(value)
 
 
 class LoginRequest(BaseModel):
     email: EmailStr
-    password: str
+    # Deliberately not the 72-byte limit: a password over that is simply
+    # wrong, and login answers "invalid credentials" for it like any other
+    # wrong password (see password_service.verify_password). This only stops
+    # absurdly large bodies.
+    password: str = Field(min_length=1, max_length=1024)
 
 
 class RefreshRequest(BaseModel):
@@ -74,13 +98,8 @@ class ChangePasswordRequest(BaseModel):
 
     @field_validator("new_password")
     @classmethod
-    def new_password_must_fit_bcrypt(cls, value: str) -> str:
-        if len(value.encode("utf-8")) > MAX_PASSWORD_BYTES:
-            raise ValueError(
-                f"new_password must be at most {MAX_PASSWORD_BYTES} bytes "
-                "(bcrypt silently truncates anything longer)."
-            )
-        return value
+    def new_password_meets_policy(cls, value: str) -> str:
+        return check_password_policy(value, "new_password")
 
 
 class SessionResponse(BaseModel):

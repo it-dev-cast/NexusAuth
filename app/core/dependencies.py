@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.core.errors import AuthError
 from app.core.jwt_service import decode_typed_token
 from app.core.logging import log_rbac_denied
-from app.database.database import get_db
+from app.database.database import commit_now, get_db
 from app.models.revoked_token import RevokedToken
 from app.models.user import User
 
@@ -100,15 +100,20 @@ def _record_access_denied(db: Session, current_user: User, endpoint: str) -> Non
     # distinct from log_rbac_denied's plain-text log line (Module 2/7).
     from app.services.audit_service import record_audit_event
 
+    # Committed now: the request fails with 403 and its transaction is
+    # rolled back, but the denial record must remain.
+    actor_id, actor_role = current_user.id, current_user.role
+    db.rollback()
     record_audit_event(
         db,
-        current_user.id,
+        actor_id,
         "access_denied",
         "rbac",
-        resource_id=current_user.id,
+        resource_id=actor_id,
         old_value=None,
-        new_value={"endpoint": endpoint, "role": current_user.role},
+        new_value={"endpoint": endpoint, "role": actor_role},
     )
+    commit_now(db)
 
 
 def require_roles(*allowed: str):
@@ -134,6 +139,9 @@ def require_roles(*allowed: str):
             )
         return current_user
 
+    # Read by the OpenAPI generator (app/core/openapi_docs.py) to document
+    # which roles each endpoint accepts.
+    checker.required_roles = sorted(allowed_roles)
     return checker
 
 
@@ -156,3 +164,11 @@ def get_admin_user(
             message="You do not have permission to access this resource.",
         )
     return current_user
+
+
+get_admin_user.required_roles = ["admin"]
+get_current_user.required_roles = ["admin", "operator", "read_only"]
+get_logout_user.required_roles = ["admin", "operator", "read_only"]
+
+# Shared with other modules that deny access themselves (e.g. reports).
+record_access_denied = _record_access_denied

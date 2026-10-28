@@ -21,6 +21,11 @@ class Asset(Base):
     manufacturer: Mapped[str] = mapped_column(String(255), nullable=False)
     model: Mapped[str] = mapped_column(String(255), nullable=False)
     serial_number: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    # Added by migration d9f3a7c5b182 (master-backed fields); mapped here so
+    # autogenerate doesn't read it as a dropped columns. Not exposed by the API yet.
+    category: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    condition: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    location: Mapped[str | None] = mapped_column(String(150), nullable=True)
 
     # Suppliers are never hard-deleted (no delete endpoint exists for them,
     # only status transitions), so RESTRICT here is a safety net, matching

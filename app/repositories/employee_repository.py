@@ -2,6 +2,7 @@ from sqlalchemy import func, literal, or_
 from sqlalchemy.orm import Session
 
 from app.models.employee import Employee
+from app.core.list_query import apply_list_filters, list_order
 
 
 def get_employee_by_id(db: Session, employee_id: int) -> Employee | None:
@@ -37,36 +38,39 @@ def create_employee(db: Session, employee: Employee) -> Employee:
     return employee
 
 
+def employee_search_clause(search: str):
+    """Partial, case-insensitive match on name, email, employee_code, or
+    designation (Module 9: Filtering & Sorting) - all plain String columns,
+    not EncryptedString, so ILIKE works directly at the DB layer. The concat
+    covers a "first last" combined search (e.g. something typed from the
+    Employees table's own name column); first_name/last_name individually
+    still catch a single-token search that concat alone would miss whenever
+    it doesn't happen to land on the space boundary. Public because the
+    application-access search reuses exactly this rule."""
+    like = f"%{search}%"
+    full_name = Employee.first_name + literal(" ") + Employee.last_name
+    return or_(
+        Employee.first_name.ilike(like),
+        Employee.last_name.ilike(like),
+        full_name.ilike(like),
+        Employee.email.ilike(like),
+        Employee.employee_code.ilike(like),
+        Employee.designation.ilike(like),
+    )
+
+
 def _filtered(query, include_exited: bool, search: str | None, department: str | None = None):
     if not include_exited:
         query = query.filter(Employee.status != "exited")
     if search:
-        # Partial, case-insensitive match on name, email, employee_code, or
-        # designation (Module 9: Filtering & Sorting) — all plain String
-        # columns, not EncryptedString, so ILIKE works directly at the DB
-        # layer. The concat covers a "first last" combined search (e.g.
-        # something typed from the Employees table's own name column);
-        # first_name/last_name individually still catch a single-token
-        # search that concat alone would miss whenever it doesn't happen to
-        # land on the space boundary.
-        like = f"%{search}%"
-        full_name = Employee.first_name + literal(" ") + Employee.last_name
-        query = query.filter(
-            or_(
-                Employee.first_name.ilike(like),
-                Employee.last_name.ilike(like),
-                full_name.ilike(like),
-                Employee.email.ilike(like),
-                Employee.employee_code.ilike(like),
-                Employee.designation.ilike(like),
-            )
-        )
+        query = query.filter(employee_search_clause(search))
     if department:
-        # Exact match, not ILIKE — this is meant to back the Departments
+        # Exact match, not ILIKE - this is meant to back the Departments
         # page's "view employees in this department" drill-down, matching
         # a specific master-list name rather than free-text search.
         query = query.filter(Employee.department == department)
-    return query
+    # Extra field[op]=value filters from the request, if any (app/core/list_query.py).
+    return apply_list_filters(query, Employee)
 
 
 def list_employees_by_company(
@@ -87,7 +91,7 @@ def list_employees_by_company(
     # Newest first by default — see the matching comment in
     # company_repository.py. Still fully overridable via sort_dir.
     order = column.asc() if sort_dir == "asc" else column.desc()
-    return query.order_by(order).limit(limit).offset(offset).all()
+    return query.order_by(*list_order(Employee, order)).limit(limit).offset(offset).all()
 
 
 def list_all_employees(
@@ -107,7 +111,7 @@ def list_all_employees(
     query = _filtered(db.query(Employee), include_exited, search, department)
     column = Employee.created_at if sort_by == "created_at" else Employee.id
     order = column.asc() if sort_dir == "asc" else column.desc()
-    return query.order_by(order).limit(limit).offset(offset).all()
+    return query.order_by(*list_order(Employee, order)).limit(limit).offset(offset).all()
 
 
 def count_all_employees(
@@ -166,11 +170,18 @@ def count_employees_by_department(db: Session) -> dict[str, int]:
 
 def count_employees_by_job_role(db: Session) -> dict[str, int]:
     """Same as count_employees_by_department, but for JobRole — see that
-    function's docstring."""
-    rows = (
-        db.query(Employee.job_role, func.count(Employee.id))
-        .filter(Employee.status != "exited")
-        .group_by(Employee.job_role)
-        .all()
+    function's docstring.
+
+    The Job Roles master fills the Employee form's Job role dropdown, which
+    saves into both `designation` and `job_role`, so an employee counts toward
+    a role when either field carries its name — once, even if both do.
+    """
+    by_job_role = db.query(Employee.id.label("employee_id"), Employee.job_role.label("name")).filter(
+        Employee.status != "exited"
     )
-    return {job_role: count for job_role, count in rows}
+    by_designation = db.query(Employee.id.label("employee_id"), Employee.designation.label("name")).filter(
+        Employee.status != "exited", Employee.designation.isnot(None)
+    )
+    matched = by_job_role.union(by_designation).subquery()
+    rows = db.query(matched.c.name, func.count(matched.c.employee_id)).group_by(matched.c.name).all()
+    return {name: count for name, count in rows}

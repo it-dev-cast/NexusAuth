@@ -24,7 +24,7 @@ PUBLIC_PATHS = {
     "/health",
     "/readiness",
     "/favicon.ico",
-    "/db-test",
+    "/.well-known/jwks.json",  # public keys only
     "/openapi.json",
     "/docs",
     "/redoc",

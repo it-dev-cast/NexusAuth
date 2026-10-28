@@ -47,3 +47,44 @@ def test_unknown_resource_or_action_still_raises():
         allowed_roles("no_such_resource", "read")
     with pytest.raises(KeyError):
         allowed_roles("company", "no_such_action")
+
+
+def test_permissions_for_role_matches_allowed_roles():
+    from app.core.permissions import permissions_for_role
+
+    for role in (Role.ADMIN, Role.OPERATOR, Role.READ_ONLY):
+        granted = permissions_for_role(role)
+        for resource, actions in PERMISSIONS.items():
+            for action in actions:
+                assert (action in granted.get(resource, [])) == (
+                    role in allowed_roles(resource, action)
+                ), f"{role} {resource}/{action}"
+
+
+def test_me_returns_the_callers_permissions():
+    from app.database.database import SessionLocal
+    from app.models.user import User
+    from app.tests.conftest import PASSWORD, client, register_and_login
+
+    expected = {
+        Role.OPERATOR: {"employee": ["read", "write"], "supplier": ["read", "write"]},
+        Role.READ_ONLY: {"supplier": ["read"], "asset": ["read"]},
+    }
+    for role, must_include in expected.items():
+        email, _ = register_and_login()
+        db = SessionLocal()
+        db.query(User).filter(User.email == email).update({"role": role})
+        db.commit()
+        db.close()
+        access = client.post(
+            "/api/v1/auth/login", json={"email": email, "password": PASSWORD}
+        ).json()["data"]["access_token"]
+        me = client.get(
+            "/api/v1/auth/me", headers={"Authorization": f"Bearer {access}"}
+        ).json()["data"]
+        for resource, actions in must_include.items():
+            assert me["permissions"][resource] == actions
+        # Admin-only areas never show up for these roles.
+        assert "audit_log" not in me["permissions"]
+        assert "event" not in me["permissions"]
+    assert "employee" not in me["permissions"]  # read_only: PII stays hidden

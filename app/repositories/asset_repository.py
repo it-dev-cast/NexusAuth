@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.models.asset import Asset
 from app.models.asset_tag import AssetTag
+from app.core.list_query import apply_list_filters, list_order
 
 
 def get_asset_by_id(db: Session, asset_id: int) -> Asset | None:
@@ -45,7 +46,8 @@ def _filtered(query, status: str | None, supplier_id: int | None, search: str | 
                 ),
             )
         )
-    return query
+    # Extra field[op]=value filters from the request, if any (app/core/list_query.py).
+    return apply_list_filters(query, Asset)
 
 
 _SORTABLE_COLUMNS = {
@@ -67,7 +69,7 @@ def list_assets(
     query = _filtered(db.query(Asset), status, supplier_id, search)
     column = _SORTABLE_COLUMNS.get(sort_by, Asset.id)
     order = column.desc() if sort_dir == "desc" else column.asc()
-    return query.order_by(order).limit(limit).offset(offset).all()
+    return query.order_by(*list_order(Asset, order)).limit(limit).offset(offset).all()
 
 
 def count_assets(

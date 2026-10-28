@@ -2,6 +2,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.department import Department
+from app.core.list_query import apply_list_filters, list_order
 
 
 def get_department_by_id(db: Session, department_id: int) -> Department | None:
@@ -36,7 +37,8 @@ def _filtered(
         query = query.filter(Department.parent_department_id.is_(None))
     elif parent_department_id is not None:
         query = query.filter(Department.parent_department_id == parent_department_id)
-    return query
+    # Extra field[op]=value filters from the request, if any (app/core/list_query.py).
+    return apply_list_filters(query, Department)
 
 
 def list_departments(
@@ -49,7 +51,7 @@ def list_departments(
     top_level_only: bool = False,
 ) -> list[Department]:
     query = _filtered(db.query(Department), include_inactive, search, parent_department_id, top_level_only)
-    return query.order_by(Department.name.asc()).limit(limit).offset(offset).all()
+    return query.order_by(*list_order(Department, Department.name.asc())).limit(limit).offset(offset).all()
 
 
 def count_departments(

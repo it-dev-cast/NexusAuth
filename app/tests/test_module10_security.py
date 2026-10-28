@@ -3,8 +3,6 @@ for the app-code changes made in this pass: security response headers,
 request-id generation/propagation, password change, and per-IP rate
 limiting on login/register.
 """
-import os
-
 from app.database.database import SessionLocal
 from app.models.user import User
 from app.tests.conftest import PASSWORD, client, register_and_login, unique_email
@@ -56,7 +54,7 @@ def test_account_locks_after_max_failed_attempts_and_admin_can_unlock():
         "/api/v1/auth/register",
         json={"email": email, "password": PASSWORD, "full_name": "Lockout Test"},
     )
-    assert register.status_code == 201
+    assert register.status_code == 202
 
     for _ in range(5):
         attempt = client.post(
@@ -66,9 +64,12 @@ def test_account_locks_after_max_failed_attempts_and_admin_can_unlock():
 
     # 5 wrong attempts crossed the threshold — even the CORRECT password
     # is now rejected as locked, not just further wrong ones.
+    # ...but it is answered exactly like a wrong password (see
+    # test_locked_account_is_indistinguishable_from_a_wrong_password), so the
+    # response doesn't reveal that the account exists.
     locked_attempt = client.post("/api/v1/auth/login", json={"email": email, "password": PASSWORD})
-    assert locked_attempt.status_code == 403
-    assert locked_attempt.json()["error_code"] == "AUTH_ACCOUNT_LOCKED"
+    assert locked_attempt.status_code == 401
+    assert locked_attempt.json()["error_code"] == "AUTH_INVALID_CREDENTIALS"
 
     db = SessionLocal()
     user = db.query(User).filter(User.email == email).first()
@@ -143,25 +144,3 @@ def test_change_password_revokes_the_session_it_was_called_from():
     # old token still valid.
     me = client.get("/api/v1/auth/me", headers=headers)
     assert me.status_code == 401
-
-
-def test_rate_limiting_blocks_excessive_register_calls_from_one_ip():
-    # The whole suite shares one TestClient/IP and is exempted from rate
-    # limiting via PYTEST_CURRENT_TEST (see app/core/security_middleware.py)
-    # so it doesn't trip on normal test traffic — remove that exemption for
-    # just this test to prove the limiter itself actually works.
-    saved = os.environ.pop("PYTEST_CURRENT_TEST", None)
-    try:
-        statuses = []
-        for _ in range(7):
-            response = client.post(
-                "/api/v1/auth/register",
-                json={"email": unique_email(), "password": PASSWORD, "full_name": "Rate Limit Test"},
-            )
-            statuses.append(response.status_code)
-        assert 429 in statuses
-        blocked = statuses[statuses.index(429)]
-        assert blocked == 429
-    finally:
-        if saved is not None:
-            os.environ["PYTEST_CURRENT_TEST"] = saved

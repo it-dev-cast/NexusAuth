@@ -5,6 +5,8 @@ from app.core.dependencies import require_roles
 from app.core.errors import api_ok
 from app.core.permissions import allowed_roles
 from app.database.database import get_db
+from app.core.list_query import LIST_QUERY_HELP, list_query
+from app.models.asset_model import AssetModel
 from app.models.user import User
 from app.schemas.asset_model import (
     AssetModelCreateRequest,
@@ -32,7 +34,7 @@ require_writer = require_roles(*allowed_roles("asset_model", "write"))
 require_deleter = require_roles(*allowed_roles("asset_model", "delete"))
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(list_query(AssetModel))], description=LIST_QUERY_HELP)
 def list_asset_models_endpoint(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),

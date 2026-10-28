@@ -16,3 +16,8 @@ __pycache__/
 .claude/
 uploads/
 _sig_preview.html
+# Local database dumps hold real data; never commit them.
+backups/
+# JWT signing keys and local session files; never commit them.
+keys/
+sid.json

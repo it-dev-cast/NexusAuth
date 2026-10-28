@@ -82,9 +82,9 @@ def test_registration_accepts_password_at_bcrypt_limit():
 
     response = client.post(
         "/api/v1/auth/register",
-        json={"email": unique_email(), "password": "a" * 72, "full_name": "Exactly 72"},
+        json={"email": unique_email(), "password": "a" * 71 + "1", "full_name": "Exactly 72"},
     )
-    assert response.status_code == 201
+    assert response.status_code == 202
 
 
 def test_login_timing_is_not_measurably_faster_for_unknown_email():

@@ -2,10 +2,12 @@ import json
 
 from sqlalchemy.orm import Session
 
+from app.core.audit import mask_value
 from app.core.employee_status import is_valid_transition
 from app.core.errors import AuthError
 from app.core.graph_utils import creates_cycle
 from app.core.pagination import paginated
+from app.core.permissions import allowed_roles
 from app.core.roles import Role
 from app.core.tenancy import enforce_company_scope
 from app.models.application import Application
@@ -48,7 +50,13 @@ def _company_not_found() -> AuthError:
 
 
 def _snapshot(employee: Employee) -> dict:
-    return EmployeeResponse.model_validate(employee).model_dump(mode="json")
+    data = EmployeeResponse.model_validate(employee).model_dump(mode="json")
+    # An employee's address is a home address (encrypted at rest), so audit
+    # rows keep only its last characters. Company addresses are business
+    # data and stay readable in their own audit rows.
+    if data.get("address"):
+        data["address"] = mask_value(data["address"])
+    return data
 
 
 def _company_defaults(company: Company) -> dict:
@@ -105,6 +113,20 @@ def _validate_user_link(db: Session, company_id: int, user_id: int | None) -> No
         raise _employee_error(
             "EMPLOYEE_USER_ALREADY_LINKED",
             "This user account is already linked to another employee.",
+        )
+
+
+def _require_link_permission(current_user: User) -> None:
+    # Linking a login account to an employee is the admin-only
+    # "employee/link_user" action, whichever endpoint the user_id arrives
+    # through. Without this, an operator could set user_id on create (only
+    # PATCH /link-user was gated) — and exiting that employee later would
+    # deactivate the linked account, including an administrator's.
+    if current_user.role not in allowed_roles("employee", "link_user"):
+        raise _employee_error(
+            "EMPLOYEE_LINK_FORBIDDEN",
+            "Only an administrator can link a user account to an employee.",
+            status_code=403,
         )
 
 
@@ -199,6 +221,8 @@ def create_employee_record(db: Session, data: EmployeeCreateRequest, current_use
 
     _check_employee_code_available(db, data.company_id, data.employee_code, None)
 
+    if data.user_id is not None:
+        _require_link_permission(current_user)
     _validate_user_link(db, data.company_id, data.user_id)
     _validate_manager_assignment(db, data.company_id, None, data.manager_id)
     applications = _validate_application_ids(db, data.application_ids)
@@ -466,7 +490,15 @@ def update_employee_record(
         # in model_fields_set when the caller actually sent the key, so an
         # explicit [] correctly clears all access rather than being
         # indistinguishable from "didn't mention it".
-        employee.applications = _validate_application_ids(db, data.application_ids or [])
+        requested = _validate_application_ids(db, data.application_ids or [])
+        # The form's checkbox list only offers active applications, so an
+        # existing grant on a since-deactivated one can't appear in it. It is
+        # kept here rather than silently dropped by a routine employee save;
+        # it is removed only by an explicit revoke (application access
+        # endpoints) or by reactivating and unticking it.
+        requested_ids = {application.id for application in requested}
+        kept_inactive = [a for a in employee.applications if not a.is_active and a.id not in requested_ids]
+        employee.applications = requested + kept_inactive
     if "bank_account_number" in fields:
         employee.bank_account_number = data.bank_account_number
     if "bank_ifsc" in fields:
@@ -514,8 +546,16 @@ def update_employee_status(
     # someone who has left shouldn't keep an active account. This is a
     # deliberate cascade (soft-delete on Employee -> soft-disable on User),
     # not a hard delete of the User row.
+    # Only an administrator may switch off an administrator's account, so a
+    # non-admin can't exit an employee whose linked login is an admin's.
     if new_status == "exited" and employee.user_id is not None:
         linked_user = db.query(User).filter(User.id == employee.user_id).first()
+        if linked_user and linked_user.role == Role.ADMIN and current_user.role != Role.ADMIN:
+            raise _employee_error(
+                "EMPLOYEE_EXIT_FORBIDDEN",
+                "Only an administrator can exit an employee linked to an administrator account.",
+                status_code=403,
+            )
         if linked_user and linked_user.is_active:
             linked_user.is_active = False
 

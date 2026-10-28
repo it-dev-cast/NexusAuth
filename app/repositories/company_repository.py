@@ -2,6 +2,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.company import Company
+from app.core.list_query import apply_list_filters, list_order
 
 
 def get_company_by_id(db: Session, company_id: int) -> Company | None:
@@ -28,7 +29,8 @@ def _filtered(query, include_inactive: bool, search: str | None, company_type: s
         query = query.filter(Company.name.ilike(f"%{search}%"))
     if company_type:
         query = query.filter(Company.company_type == company_type)
-    return query
+    # Extra field[op]=value filters from the request, if any (app/core/list_query.py).
+    return apply_list_filters(query, Company)
 
 
 def list_companies(
@@ -49,7 +51,7 @@ def list_companies(
     # ascending order — exactly the "I just created one and don't see it"
     # bug. Still fully overridable per-request via sort_dir.
     order = column.asc() if sort_dir == "asc" else column.desc()
-    return query.order_by(order).limit(limit).offset(offset).all()
+    return query.order_by(*list_order(Company, order)).limit(limit).offset(offset).all()
 
 
 def count_companies(

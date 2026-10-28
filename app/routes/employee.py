@@ -1,10 +1,15 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
+from app.core.audit import ADMIN_ONLY_PII, mask_value
+from app.services.audit_service import record_audit_event
 from app.core.dependencies import require_roles
 from app.core.errors import api_ok
 from app.core.permissions import allowed_roles
 from app.database.database import get_db
+from app.core.roles import Role
+from app.core.list_query import LIST_QUERY_HELP, list_query
+from app.models.employee import Employee
 from app.models.user import User
 from app.schemas.employee import (
     EmployeeCreateRequest,
@@ -13,6 +18,7 @@ from app.schemas.employee import (
     EmployeeStatusUpdateRequest,
     EmployeeUpdateRequest,
 )
+from app.services.application_access_service import list_access_for_employee
 from app.services.employee_service import (
     create_employee_record,
     get_employee_by_company_email,
@@ -36,8 +42,39 @@ require_writer = require_roles(*allowed_roles("employee", "write"))
 require_deleter = require_roles(*allowed_roles("employee", "delete"))
 require_linker = require_roles(*allowed_roles("employee", "link_user"))
 
+# Government ID and bank numbers (ADMIN_ONLY_PII) are shown in full only to
+# administrators; everyone else gets the last 4 characters (same masking as
+# the audit log), enough to recognise a record without exposing the number.
+def _employee_out(employee, current_user: User) -> dict:
+    data = EmployeeResponse.model_validate(employee).model_dump()
+    if current_user.role != Role.ADMIN:
+        for field in ADMIN_ONLY_PII:
+            if data.get(field):
+                data[field] = mask_value(data[field])
+    return data
 
-@router.get("")
+
+def _audit_pii_reads(db: Session, current_user: User, rows: list[dict]) -> None:
+    """Record that an administrator was shown full ID/bank numbers: which
+    employees and which fields, never the values. Nothing is logged when the
+    response held none (or only masked ones)."""
+    if current_user.role != Role.ADMIN:
+        return
+    shown = {row["id"]: sorted(f for f in ADMIN_ONLY_PII if row.get(f)) for row in rows}
+    shown = {employee_id: fields for employee_id, fields in shown.items() if fields}
+    if not shown:
+        return
+    record_audit_event(
+        db,
+        current_user.id,
+        "pii_access",
+        "employee",
+        resource_id=next(iter(shown)) if len(shown) == 1 else None,
+        new_value={"employee_ids": sorted(shown), "fields": sorted({f for fs in shown.values() for f in fs})},
+    )
+
+
+@router.get("", dependencies=[Depends(list_query(Employee))], description=LIST_QUERY_HELP)
 def list_employees_endpoint(
     # Optional: omitting it means "every company" for an admin (see
     # employee_service.list_company_employees), or "my own company" for
@@ -71,8 +108,9 @@ def list_employees_endpoint(
         sort_dir=sort_dir,
     )
     result["items"] = [
-        EmployeeResponse.model_validate(employee).model_dump() for employee in result["items"]
+        _employee_out(employee, current_user) for employee in result["items"]
     ]
+    _audit_pii_reads(db, current_user, result["items"])
     return api_ok(result)
 
 
@@ -86,7 +124,9 @@ def get_employee_by_email_endpoint(
     # Declared before /{employee_id} — otherwise "by-email" would be parsed
     # as an employee_id and 422 before ever reaching this route.
     employee = get_employee_by_company_email(db, company_id, email, current_user)
-    return api_ok(EmployeeResponse.model_validate(employee).model_dump())
+    data = _employee_out(employee, current_user)
+    _audit_pii_reads(db, current_user, [data])
+    return api_ok(data)
 
 
 @router.get("/{employee_id}")
@@ -96,7 +136,22 @@ def get_employee_endpoint(
     db: Session = Depends(get_db),
 ):
     employee = get_employee_for_user(db, employee_id, current_user)
-    return api_ok(EmployeeResponse.model_validate(employee).model_dump())
+    data = _employee_out(employee, current_user)
+    _audit_pii_reads(db, current_user, [data])
+    return api_ok(data)
+
+
+@router.get("/{employee_id}/applications")
+def list_employee_applications_endpoint(
+    employee_id: int,
+    current_user: User = Depends(require_reader),
+    db: Session = Depends(get_db),
+):
+    """The applications this employee holds, with status and grant date.
+    Read-only here, same audience and company scoping as the employee
+    itself; changing grants is admin-only and lives under
+    /api/v1/applications/{id}/access."""
+    return api_ok(list_access_for_employee(db, employee_id, current_user))
 
 
 @router.post("", status_code=201)
@@ -106,7 +161,7 @@ def create_employee_endpoint(
     db: Session = Depends(get_db),
 ):
     employee = create_employee_record(db, data, current_user)
-    return api_ok(EmployeeResponse.model_validate(employee).model_dump())
+    return api_ok(_employee_out(employee, current_user))
 
 
 @router.put("/{employee_id}")
@@ -117,7 +172,7 @@ def update_employee_endpoint(
     db: Session = Depends(get_db),
 ):
     employee = update_employee_record(db, employee_id, data, current_user)
-    return api_ok(EmployeeResponse.model_validate(employee).model_dump())
+    return api_ok(_employee_out(employee, current_user))
 
 
 @router.patch("/{employee_id}/status")
@@ -128,7 +183,7 @@ def update_employee_status_endpoint(
     db: Session = Depends(get_db),
 ):
     employee = update_employee_status(db, employee_id, data.status, current_user)
-    return api_ok(EmployeeResponse.model_validate(employee).model_dump())
+    return api_ok(_employee_out(employee, current_user))
 
 
 @router.patch("/{employee_id}/link-user")
@@ -139,7 +194,7 @@ def link_employee_user_endpoint(
     db: Session = Depends(get_db),
 ):
     employee = link_employee_to_user(db, employee_id, data.user_id, current_user)
-    return api_ok(EmployeeResponse.model_validate(employee).model_dump())
+    return api_ok(_employee_out(employee, current_user))
 
 
 @router.delete("/{employee_id}")
@@ -149,4 +204,4 @@ def delete_employee_endpoint(
     db: Session = Depends(get_db),
 ):
     employee = soft_delete_employee(db, employee_id, current_user)
-    return api_ok(EmployeeResponse.model_validate(employee).model_dump())
+    return api_ok(_employee_out(employee, current_user))

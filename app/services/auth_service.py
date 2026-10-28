@@ -1,9 +1,13 @@
+import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Request
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.client_ip import client_ip
 from app.core.config import get_settings
+from app.database.database import commit_now
 from app.core.errors import AuthError
 from app.core.jwt_service import (
     create_access_token,
@@ -13,6 +17,7 @@ from app.core.jwt_service import (
 )
 from app.core.logging import log_role_change
 from app.core.password_service import hash_password, verify_password
+from app.core.permissions import permissions_for_role
 from app.core.roles import ALL_ROLES, Role
 from app.models.auth_session import AuthSession
 from app.models.company import Company
@@ -46,12 +51,16 @@ from app.services.audit_service import record_audit_event
 
 from app.schemas.auth import (
     LoginRequest,
+    check_password_policy,
     RefreshRequest,
     RegisterRequest,
     TokenData,
     UserResponse,
 )
 
+
+
+logger = logging.getLogger("nexusauth.auth")
 
 def _auth_error(code: str, message: str, status_code: int = 401) -> AuthError:
     return AuthError(status_code=status_code, error_code=code, message=message)
@@ -74,7 +83,7 @@ def _default_company_id(db: Session) -> int:
 def _client_meta(request: Request | None) -> tuple[str | None, str | None]:
     if request is None:
         return None, None
-    ip_address = request.client.host if request.client else None
+    ip_address = client_ip(request) if request.client else None
     user_agent = request.headers.get("user-agent")
     if user_agent and len(user_agent) > 512:
         user_agent = user_agent[:512]
@@ -176,28 +185,58 @@ def issue_tokens(
     ).model_dump()
 
 
-def register_user(db: Session, data: RegisterRequest) -> User:
-    if get_user_by_email(db, data.email):
-        raise _auth_error(
-            "AUTH_ACCOUNT_EXISTS",
-            "Unable to create account.",
-            status_code=400,
-        )
+# What registration answers, whether or not the address was already taken.
+REGISTRATION_MESSAGE = (
+    "Registration received. If this email address is not already registered, "
+    "you can now sign in with it."
+)
 
-    role = Role.READ_ONLY
-    user = User(
-        email=data.email,
-        password_hash=hash_password(data.password),
-        full_name=data.full_name,
-        role=role,
-        company_id=_default_company_id(db),
-        is_active=True,
-        failed_login_attempts=0,
-    )
-    return create_user(db, user)
+
+def register_user(db: Session, data: RegisterRequest) -> bool:
+    """Create an account for a new email. Returns whether one was created.
+
+    The caller must not be able to tell the two outcomes apart (the route
+    answers both with the same status and body): a "that email is taken"
+    reply would let anyone test which addresses have accounts. So the
+    password is hashed first, whichever way it goes — an existing address
+    costs the same time as a new one — and a duplicate is only recorded in
+    the audit log, where administrators can see it."""
+    password_hash = hash_password(data.password)
+
+    created = False
+    if not get_user_by_email(db, data.email):
+        user = User(
+            email=data.email,
+            password_hash=password_hash,
+            full_name=data.full_name,
+            role=Role.READ_ONLY,
+            company_id=_default_company_id(db),
+            is_active=True,
+            failed_login_attempts=0,
+        )
+        try:
+            create_user(db, user)
+            created = True
+        except IntegrityError:
+            # Two sign-ups for the same address at once: the unique index
+            # let exactly one through. The other is a duplicate like any other.
+            db.rollback()
+
+    if not created:
+        record_audit_event(
+            db,
+            None,
+            "register_duplicate",
+            "auth",
+            new_value={"attempted_email": data.email, "reason": "email_exists"},
+        )
+    return created
 
 
 def _record_login_failure(db: Session, user: User | None, attempted_email: str, reason: str) -> None:
+    # Called just before login fails with an error, so commit explicitly:
+    # the failure audit row and the failed-attempt counter / lockout must
+    # survive the request's rollback.
     # Doc: "Authentication attempt logging (success/failure)" + "PII marking
     # in audit (email, phone fields)" — the attempted email is PII even on a
     # failed attempt, so it goes through the same masking as everything else
@@ -212,6 +251,7 @@ def _record_login_failure(db: Session, user: User | None, attempted_email: str, 
         new_value={"attempted_email": attempted_email, "reason": reason},
         company_id=user.company_id if user else None,
     )
+    commit_now(db)
 
 
 def login_user(db: Session, data: LoginRequest, request: Request | None = None) -> dict:
@@ -230,13 +270,17 @@ def login_user(db: Session, data: LoginRequest, request: Request | None = None) 
     # clears it, not just wrong-password ones. See
     # auth_repository.increment_failed_logins for where locked_until gets
     # set, and unlock_user_account for the admin override.
+    #
+    # The caller gets the SAME answer as for a wrong password or an unknown
+    # email (401 AUTH_INVALID_CREDENTIALS, same message). A distinct
+    # "locked" response would tell anyone who can trigger five failures that
+    # the email belongs to a real account. The reason is kept in the audit
+    # log, where administrators can see it.
     if user and user.locked_until and user.locked_until > datetime.now(timezone.utc).replace(tzinfo=None):
         _record_login_failure(db, user, data.email, "account_locked")
         raise _auth_error(
-            "AUTH_ACCOUNT_LOCKED",
-            "This account is temporarily locked due to repeated failed login "
-            "attempts. Try again later or contact an administrator.",
-            status_code=403,
+            "AUTH_INVALID_CREDENTIALS",
+            "Invalid email or password.",
         )
 
     if not user or not password_ok:
@@ -332,6 +376,8 @@ def _handle_suspected_refresh_reuse(db: Session, session: AuthSession) -> None:
         old_value=None,
         new_value={"session_id": session.id},
     )
+    # The request fails right after this; the revocations must stick.
+    commit_now(db)
 
 
 def logout_user(db: Session, current_user: User) -> dict:
@@ -378,6 +424,7 @@ def current_user_payload(db: Session, current_user: User) -> dict:
             touch_session(db, session)
     return {
         **UserResponse.model_validate(current_user).model_dump(),
+        "permissions": permissions_for_role(current_user.role),
         "claims": {
             "user_id": claims.get("user_id") or claims.get("sub"),
             "roles": claims.get("roles"),
@@ -491,11 +538,21 @@ def bootstrap_admin(db: Session) -> None:
         db.commit()
         return
     if count_users(db) == 0:
+        # No built-in password: the first admin's password must come from the
+        # environment, or the account isn't created at all.
+        password = get_settings().bootstrap_admin_password
+        if not password:
+            logger.warning(
+                "No users exist and BOOTSTRAP_ADMIN_PASSWORD is not set, so no "
+                "admin account was created. Set it and restart, or run "
+                "scripts/seed_admin.py."
+            )
+            return
         create_user(
             db,
             User(
                 email="admin@casterly.com",
-                password_hash=hash_password("ExamplePasswordOnly"),
+                password_hash=hash_password(check_password_policy(password, "BOOTSTRAP_ADMIN_PASSWORD")),
                 full_name="Administrator",
                 role=Role.ADMIN,
                 company_id=_default_company_id(db),
